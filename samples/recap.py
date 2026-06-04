@@ -76,6 +76,32 @@ def print_recap(conversation: Conversation) -> None:
     print("└" + "─" * 68 + "\n")
 
 
+_idle_timer: threading.Timer | None = None
+
+
+def arm_idle_timer(conversation: Conversation) -> None:
+    """Replace any pending timer with a fresh IDLE_SECONDS timer.
+
+    Called every time conversation.run() returns. The timer fires in a
+    background thread and calls print_recap if not canceled first.
+    """
+    global _idle_timer
+    cancel_idle_timer()
+    _idle_timer = threading.Timer(
+        IDLE_SECONDS, lambda: print_recap(conversation)
+    )
+    _idle_timer.daemon = True
+    _idle_timer.start()
+
+
+def cancel_idle_timer() -> None:
+    """Cancel any pending idle timer. No-op if none is armed."""
+    global _idle_timer
+    if _idle_timer is not None:
+        _idle_timer.cancel()
+        _idle_timer = None
+
+
 def main() -> None:
     # Clean ^C exit, matching set_confirmation_policy.py.
     signal.signal(
@@ -93,6 +119,8 @@ def main() -> None:
             print()
             break
 
+        cancel_idle_timer()  # any pending recap is preempted by the next submit
+
         if line == "/quit":
             break
         if line == "/recap":
@@ -103,6 +131,9 @@ def main() -> None:
 
         conversation.send_message(line)
         conversation.run()
+        arm_idle_timer(conversation)
+
+    cancel_idle_timer()
 
 
 if __name__ == "__main__":
