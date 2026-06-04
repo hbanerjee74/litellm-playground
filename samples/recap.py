@@ -79,6 +79,17 @@ def print_recap(conversation: Conversation) -> None:
 _idle_timer: threading.Timer | None = None
 
 
+def _auto_recap(conversation: Conversation) -> None:
+    """Timer callback: print the recap, then redraw the REPL prompt.
+
+    The main thread is blocked in input("> "), so its prompt was drawn
+    before the card. We redraw "> " after the card so the user sees a
+    fresh prompt instead of a bare cursor.
+    """
+    print_recap(conversation)
+    print("> ", end="", flush=True)
+
+
 def arm_idle_timer(conversation: Conversation) -> None:
     """Replace any pending timer with a fresh IDLE_SECONDS timer.
 
@@ -88,7 +99,7 @@ def arm_idle_timer(conversation: Conversation) -> None:
     global _idle_timer
     cancel_idle_timer()
     _idle_timer = threading.Timer(
-        IDLE_SECONDS, lambda: print_recap(conversation)
+        IDLE_SECONDS, lambda: _auto_recap(conversation)
     )
     _idle_timer.daemon = True
     _idle_timer.start()
