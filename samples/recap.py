@@ -132,7 +132,7 @@ def main() -> None:
 
         cancel_idle_timer()  # any pending recap is preempted by the next submit
 
-        if line == "/quit":
+        if line == "/exit" or line == "/quit":
             break
         if line == "/recap":
             print_recap(conversation)
