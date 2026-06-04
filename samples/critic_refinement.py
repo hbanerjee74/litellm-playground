@@ -11,6 +11,7 @@ get_followup_prompt and the loop continues, up to max_iterations.
 from __future__ import annotations
 
 import os
+import re
 import signal
 import tempfile
 from collections.abc import Sequence
@@ -103,21 +104,21 @@ class IntentCritic(CriticBase):
         judge_conv.send_message(prompt)
         judge_conv.run()
 
-        finish_msg = _last_finish_message(judge_conv.state.events)
-        if finish_msg is None:
+        verdict = _last_judge_verdict(judge_conv.state.events)
+        if verdict is None:
             return CriticResult(
                 score=0.0,
-                message="judge did not call FinishAction",
+                message="judge produced no final response",
             )
 
-        first_line, _, rest = finish_msg.partition("\n")
-        score = _parse_score(first_line)
+        score = _parse_score(verdict)
         if score is None:
+            preview = verdict.strip().splitlines()[0][:200] if verdict.strip() else ""
             return CriticResult(
                 score=0.0,
-                message=f"unparseable judge response (first line: {first_line!r})",
+                message=f"unparseable judge response (no SCORE: found; first line: {preview!r})",
             )
-        return CriticResult(score=score, message=rest.strip() or finish_msg)
+        return CriticResult(score=score, message=verdict.strip())
 
     def get_followup_prompt(
         self, critic_result: CriticResult, iteration: int
@@ -151,19 +152,39 @@ def _summarize_actions(events: Sequence["LLMConvertibleEvent"]) -> str:
     return "\n".join(lines)
 
 
-def _last_finish_message(events: Sequence) -> str | None:
+_SCORE_PATTERN = re.compile(r"\bSCORE\s*[:=]\s*([0-9]*\.?[0-9]+)", re.IGNORECASE)
+
+
+def _last_judge_verdict(events: Sequence) -> str | None:
+    """Find the judge's final verdict text.
+
+    Walks events in reverse and returns whichever comes first:
+    - The message of the most recent FinishAction, or
+    - The text of the most recent agent MessageEvent (fallback for models
+      that emit a plain reply instead of calling FinishAction).
+    """
     for ev in reversed(list(events)):
         if isinstance(ev, ActionEvent) and isinstance(ev.action, FinishAction):
             return ev.action.message
+        if isinstance(ev, MessageEvent) and ev.source == "agent":
+            parts = [
+                c.text
+                for c in ev.llm_message.content
+                if isinstance(c, TextContent)
+            ]
+            text = "\n".join(parts).strip()
+            if text:
+                return text
     return None
 
 
-def _parse_score(first_line: str) -> float | None:
-    head, sep, tail = first_line.partition(":")
-    if not sep or head.strip().upper() != "SCORE":
+def _parse_score(text: str) -> float | None:
+    """Extract a 0.0-1.0 score from anywhere in the text via SCORE: pattern."""
+    match = _SCORE_PATTERN.search(text)
+    if match is None:
         return None
     try:
-        return max(0.0, min(1.0, float(tail.strip())))
+        return max(0.0, min(1.0, float(match.group(1))))
     except ValueError:
         return None
 
@@ -184,7 +205,7 @@ def print_critic_event(event: "Event") -> None:
 def build_conversation() -> Conversation:
     load_dotenv()
     llm = LLM(
-        model="minimax/minimax-m3",
+        model="openrouter/z-ai/glm-5.1",
         api_key=SecretStr(os.environ["OPENROUTER_API_KEY"]),
         base_url="https://openrouter.ai/api/v1",
     )
