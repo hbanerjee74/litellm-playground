@@ -58,6 +58,24 @@ def build_conversation() -> Conversation:
     return conversation
 
 
+def print_recap(conversation: Conversation) -> None:
+    """Print a non-mutating recap card built from the current conversation.
+
+    Safe to call from a background thread — Conversation.ask_agent is
+    documented thread-safe and does not modify, persist, or become part of
+    the conversation state.
+    """
+    try:
+        text = conversation.ask_agent(RECAP_PROMPT)
+    except Exception as exc:  # noqa: BLE001 — deliberate: never let recap kill the REPL
+        text = f"(recap failed: {exc})"
+
+    print("\n┌─ Recap " + "─" * 60)
+    for line in text.splitlines() or [""]:
+        print("│ " + line)
+    print("└" + "─" * 68 + "\n")
+
+
 def main() -> None:
     # Clean ^C exit, matching set_confirmation_policy.py.
     signal.signal(
@@ -78,7 +96,7 @@ def main() -> None:
         if line == "/quit":
             break
         if line == "/recap":
-            print("(recap not implemented yet)")
+            print_recap(conversation)
             continue
         if not line:
             continue
