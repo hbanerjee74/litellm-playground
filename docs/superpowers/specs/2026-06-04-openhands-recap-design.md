@@ -10,11 +10,12 @@ Build the OpenHands-SDK equivalent of Claude Code's `/recap`: a non-mutating bri
 
 ## Non-goals
 
-- No idle-timer auto-trigger. `FinishAction` is the trigger. A real idle timer would require threading and an interactive terminal contract that adds noise without clarifying the recap concept.
+- No `FinishAction`-based trigger. The auto-trigger is idle time at the prompt, matching Claude Code's "user stepped away" semantics.
 - No cross-session persistence. The recap is in-memory, printed once.
 - No JSON-structured output. The LLM returns markdown; the script prints it verbatim inside a card frame.
 - No `/compact` (`Conversation.condense()`) integration. That is a separate feature and a candidate for a future sample.
 - No security analyzer or confirmation policy beyond `NeverConfirm()`. The existing `set_confirmation_policy.py` already covers that surface.
+- No special handling for the case where the recap card prints while the user is mid-typing. Terminal redraw cosmetics in canonical-line mode are out of scope; the kernel's line buffer preserves the user's keystrokes.
 
 ## Key SDK primitive: `Conversation.ask_agent`
 
@@ -34,25 +35,77 @@ A single file: `samples/recap.py`. Runnable directly via `uv run python samples/
 
 1. **LLM + Agent + Conversation setup.** Same pattern as `samples/set_confirmation_policy.py`: load `.env`, build an `LLM` for Minimax via OpenRouter, register `TerminalTool` and `FileEditorTool`, construct `Conversation(agent=agent, workspace=os.getcwd())`. Set `NeverConfirm()` policy. No security analyzer.
 
-2. **`RECAP_PROMPT` constant.** A fixed prompt string asking for the four labeled sections, with explicit instructions to use file paths and commands verbatim from history and to write `(nothing)` for empty sections.
+2. **`IDLE_SECONDS` constant.** Default `5.0`. The delay after agent activity ends before an auto-recap fires.
 
-3. **`print_recap(conversation)` function.** Calls `conversation.ask_agent(RECAP_PROMPT)`, wraps the result in a Unicode box-drawing card frame with a `Recap` header, prints to stdout. Catches any exception from `ask_agent` and prints `(recap failed: <error>)` instead of propagating.
+3. **`RECAP_PROMPT` constant.** A fixed prompt string asking for the four labeled sections, with explicit instructions to use file paths and commands verbatim from history and to write `(nothing)` for empty sections.
 
-4. **`last_action_is_finish(conversation)` helper.** Walks `conversation.state.events` in reverse and returns `True` if the most recent action-bearing event holds a `FinishAction`. Used as the auto-trigger predicate after each `conversation.run()` returns.
+4. **`print_recap(conversation)` function.** Calls `conversation.ask_agent(RECAP_PROMPT)`, wraps the result in a Unicode box-drawing card frame with a `Recap` header, prints to stdout. Catches any exception from `ask_agent` and prints `(recap failed: <error>)` instead of propagating. Safe to call from a background thread because `ask_agent` is documented thread-safe.
 
-5. **REPL loop.** Reads stdin one line at a time. Dispatches:
-   - `/recap` → `print_recap(conversation)`, re-prompt. No agent activity.
-   - `/quit` or EOF or `Ctrl-C` at the prompt → exit cleanly.
-   - Anything else → `conversation.send_message(line)`, `conversation.run()`. Then if `last_action_is_finish(conversation)` is true, auto-call `print_recap(conversation)`.
+5. **Idle timer (`threading.Timer`).** A single module-level reference holds the currently-armed timer (or `None`). Two small helpers:
+
+   ```
+   _idle_timer: threading.Timer | None = None
+
+   def arm_idle_timer(conversation):
+       global _idle_timer
+       cancel_idle_timer()
+       _idle_timer = threading.Timer(
+           IDLE_SECONDS, lambda: print_recap(conversation)
+       )
+       _idle_timer.daemon = True
+       _idle_timer.start()
+
+   def cancel_idle_timer():
+       global _idle_timer
+       if _idle_timer is not None:
+           _idle_timer.cancel()
+           _idle_timer = None
+   ```
+
+   The timer is armed only after `conversation.run()` returns (i.e., the agent has produced something worth recapping). It is canceled the moment the user submits their next line. `daemon=True` ensures process exit doesn't hang on a pending timer.
+
+6. **REPL loop.** Plain `input("> ")`, no `select`, no inner loop:
+
+   ```
+   while True:
+       try:
+           line = input("> ").strip()
+       except EOFError:
+           break
+       cancel_idle_timer()  # next submit kills any pending recap
+       if line == "/quit": break
+       if line == "/recap":
+           print_recap(conversation)
+           continue
+       if not line: continue
+       conversation.send_message(line)
+       conversation.run()
+       arm_idle_timer(conversation)
+   cancel_idle_timer()
+   ```
 
 ### Data flow
 
 ```
-user line ──> REPL dispatcher
-              │
-              ├── "/recap" ─────────────────────────────────> print_recap ──> ask_agent ──> stdout
-              ├── "/quit" / EOF ─> exit
-              └── other text ─> send_message ─> run() ──> [tail event] ─> if FinishAction ─> print_recap
+                ┌─────────────────────────────┐
+                │ REPL: input("> ")           │  (blocking, main thread)
+                └──────┬──────────────────────┘
+                       │
+   ┌───────────────────┼───────────────────┬──────────────────────┐
+   │                   │                   │                      │
+"/recap"            "/quit"/EOF        empty line              other text
+   │                   │                   │                      │
+   ▼                   ▼                   ▼                      ▼
+cancel timer        cancel timer        cancel timer          cancel timer
+print_recap         exit                continue              send_message
+   │                                                           run()
+   │                                                           arm_idle_timer ──► (background thread,
+   │                                                                              fires after 5s,
+   │                                                                              calls print_recap)
+   └───────────────────────────────────────────────────────────┘
+                       │
+                       ▼
+                  (loop back to input)
 ```
 
 ### File layout impact
@@ -66,11 +119,13 @@ user line ──> REPL dispatcher
 
 | Condition | Behavior |
 |---|---|
-| `KeyboardInterrupt` at REPL input prompt | Clean exit, no traceback. Reuse the `signal.signal(SIGINT, ...)` pattern from `set_confirmation_policy.py`. |
-| `KeyboardInterrupt` mid-`conversation.run()` | Break the REPL loop, call `print_recap` once on the way out, then exit. |
-| `ask_agent` raises inside `print_recap` | Catch, print `(recap failed: <error>)` inside the card frame. Continue the REPL. |
+| `KeyboardInterrupt` at REPL input prompt | Clean exit. `cancel_idle_timer()` called in a `finally` block (or after the loop) so a pending recap doesn't fire post-exit. Reuse the `signal.signal(SIGINT, ...)` pattern from `set_confirmation_policy.py`. |
+| `KeyboardInterrupt` mid-`conversation.run()` | Break the REPL loop. Cancel timer. Exit. |
+| `ask_agent` raises inside `print_recap` (called from timer thread) | Catch in `print_recap`, print `(recap failed: <error>)` inside the card frame. Continue. An uncaught exception in a `Timer` thread would just be swallowed by the default thread excepthook, but we catch defensively. |
 | `/recap` typed before any user message | Let `ask_agent` answer normally — the LLM will note an empty session. No special case. |
-| `run()` returns without a `FinishAction` (e.g., agent paused) | No auto-recap. User can still type `/recap` manually. |
+| Timer fires while the user is mid-typing (partial line, no newline) | Card prints to stdout from the timer thread. Partial input remains in the terminal driver's buffer and is preserved when the user resumes typing. Visual is imperfect but functional; acceptable for a sample. |
+| Race: timer fires at the same moment the user submits a line | Possible. `Timer.cancel()` only prevents firing if the timer hasn't already started running its target. If the recap runs concurrently with `send_message` / `run`, `ask_agent`'s thread-safety guarantee holds, so the worst case is one extra recap card printed late. Acceptable. |
+| Multiple `run()` calls before any idle fires (e.g., user submits twice quickly) | Each `arm_idle_timer` calls `cancel_idle_timer` first, replacing the previous timer. Only the most recent arm is active. |
 
 ## Recap prompt
 
@@ -92,7 +147,9 @@ Do not add any preamble or closing remarks outside the four sections.
 
 ```
 > List the files in this directory.
-... agent runs TerminalTool ...
+... agent runs TerminalTool, run() returns ...
+... (idle timer armed) ...
+>             ← user steps away, 5s passes, timer fires in background
 ┌─ Recap ────────────────────────────────────────────────────
 │ ## What you did
 │ - Listed files in the current working directory.
@@ -103,22 +160,26 @@ Do not add any preamble or closing remarks outside the four sections.
 │ ## Files touched
 │ - (nothing)
 └────────────────────────────────────────────────────────────
+              ← no further recaps until the next run() returns
 
 > Create a file recap_demo.txt with the line "hello recap".
-... agent runs FileEditorTool ...
+              ← user types this within 5s; timer cancellation is no-op
+                (timer already fired above). New timer arms after run().
+... agent runs FileEditorTool, run() returns ...
+>             ← user steps away again, 5s passes
 ┌─ Recap ────────────────────────────────────────────────────
 │ ## What you did
-│ - Created recap_demo.txt with one line of content.
+│ - Listed files in the directory, then created recap_demo.txt.
 │ ## What changed
-│ - New file recap_demo.txt added to the workspace.
+│ - New file recap_demo.txt added with one line of content.
 │ ## What's next
 │ - Confirm contents or extend the file further.
 │ ## Files touched
 │ - recap_demo.txt
 └────────────────────────────────────────────────────────────
 
-> /recap
-(same card, regenerated from current state, no new events)
+> /recap     ← manual; prints immediately, no agent activity
+(card regenerated from current state, no new events)
 
 > /quit
 ```
@@ -128,10 +189,13 @@ Do not add any preamble or closing remarks outside the four sections.
 This is a playground sample. Verification is manual:
 
 1. `uv run python samples/recap.py` starts and prompts.
-2. Issuing a real instruction produces a `FinishAction` and an auto-recap card.
-3. `/recap` on demand produces a card without sending a message to the agent.
-4. `conversation.state.events` length is unchanged across `print_recap` calls (the non-mutation contract). Spot-check by adding a temporary `print(len(conversation.state.events))` during dev.
-5. `Ctrl-C` at the prompt exits cleanly; `Ctrl-C` mid-run prints a farewell recap and exits.
+2. Issue an instruction, let the agent finish, then wait 5s without typing — an auto-recap card prints from the timer thread.
+3. Wait another 5s — no second recap fires (the timer has already fired and isn't re-armed until the next `run()` returns).
+4. Submit a new line within 5s of the previous `run()` — confirm the pending timer is canceled and no recap appears.
+5. After the next `run()`, wait 5s — fresh recap fires.
+6. `/recap` on demand produces a card without sending a message to the agent.
+7. `conversation.state.events` length is unchanged across `print_recap` calls (the non-mutation contract). Spot-check by adding a temporary `print(len(conversation.state.events))` during dev.
+8. `Ctrl-C` at the prompt exits cleanly without leaving a pending timer (process exits even if cancel was missed, because the timer is `daemon=True`).
 
 No automated tests. The playground does not have a test harness, and adding one for one sample is out of scope.
 
@@ -141,7 +205,9 @@ None. Architecture, primitive, trigger, and prompt are all settled.
 
 ## Future extensions (not in scope)
 
-- Idle-timer auto-trigger via a background `threading.Timer` reset on every input line.
+- Configurable `IDLE_SECONDS` via env var (e.g. `RECAP_IDLE_SECONDS`).
+- Raw-mode keystroke detection so partial typing also defers the timer.
+- `FinishAction`-based trigger as an additional auto-fire path, alongside the idle timer.
 - `/compact` sample using `Conversation.condense()`.
 - Cross-session resume: persist the last recap to disk and inject it as the opening assistant message in a fresh conversation.
 - Plug the recap into a non-REPL agent loop (e.g., after each high-level task in a longer plan).
