@@ -106,7 +106,13 @@ PYTHON_AGENT_SUFFIX = (
     "secure, reasonably efficient, idiomatic, and maintainable. When the "
     "user is implicit about style, default to PEP 8, type hints, and clear "
     "naming. Verify your work (e.g. by reading the files you created or "
-    "running them) before calling FinishAction."
+    "running them) before calling FinishAction.\n\n"
+    "EXECUTION DISCIPLINE: When you make a plan with task_tracker, "
+    "immediately execute every task on it yourself — do not stop after "
+    "planning to wait for user direction. Mark tasks complete as you go. "
+    "Every turn MUST end with a FinishAction; never end a turn with a "
+    "plain message. If you genuinely cannot proceed, call FinishAction "
+    "with a message explaining the blocker rather than yielding silently."
 )
 
 
@@ -174,8 +180,14 @@ class IntentCritic(CriticBase):
             f"A reviewer scored your work at {critic_result.score:.0%} "
             f"(iteration {iteration}).\n\n"
             f"Reviewer feedback:\n{critic_result.message}\n\n"
-            "Address the gaps and call FinishAction again only when you "
-            "have fully completed the original request."
+            "Now work through ALL of the issues above end-to-end in this "
+            "same turn. If you use task_tracker to plan, immediately "
+            "execute every task on the plan — do not stop after planning. "
+            "Edit the files, re-run any verification commands, and only "
+            "then call FinishAction summarizing what you changed. This "
+            "turn MUST end with a FinishAction; do not yield with a plain "
+            "message. If a specific issue truly cannot be addressed, call "
+            "FinishAction with an explanation of the blocker."
         )
 
 
