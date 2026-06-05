@@ -272,7 +272,7 @@ def build_conversation() -> Conversation:
         tools=judge_tools,
         workspace=workspace,
         iterative_refinement=IterativeRefinementConfig(
-            success_threshold=0.7,
+            success_threshold=0.99, # set high to force multiple iterations for demo purposes
             max_iterations=3,
         ),
     )
