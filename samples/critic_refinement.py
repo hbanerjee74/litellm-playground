@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 from pydantic import Field, SecretStr
 
 from openhands.sdk import LLM, Agent, Conversation
+from openhands.sdk.context.agent_context import AgentContext
 from openhands.sdk.critic.base import CriticBase, IterativeRefinementConfig
 from openhands.sdk.critic.result import CriticResult
 from openhands.sdk.event.llm_convertible.action import ActionEvent
@@ -40,7 +41,8 @@ if TYPE_CHECKING:
 
 
 JUDGE_PROMPT_TEMPLATE = """\
-You are reviewing another agent's work. Be strict.
+You are a senior Python code reviewer. Evaluate the agent's work against the
+user's request and the rubric below.
 
 USER'S ORIGINAL REQUEST:
 {user_intent}
@@ -48,19 +50,64 @@ USER'S ORIGINAL REQUEST:
 AGENT'S CLAIMED ACTIONS:
 {action_summary}
 
-You have read-only access to the workspace via terminal commands. Use only
-inspection commands: ls, cat, head, tail, grep, find, wc, diff. Do NOT modify
-the workspace — no rm, mv, cp, touch, redirects (>, >>), sed -i, or any
-command that writes.
+Independently verify the work — do NOT trust the claimed actions summary.
+Use only read-only terminal commands (ls, cat, head, tail, grep, find, wc,
+diff) to inspect the workspace. Do NOT modify it (no rm, mv, cp, touch,
+redirects, sed -i, or any command that writes).
+
+Scoring rubric — score each category from 0.0 (failing) to 1.0 (perfect).
+Skip any category that does not apply to the user's request rather than
+penalizing it. Be fair: do not dock points for missing production polish
+the user did not ask for, and do not inflate scores out of politeness.
+
+1. Correctness & Logic (weight 25%)
+   - Does the code do what the user asked? Stated edge cases handled?
+   - Verify: cat the files the agent claims to have created; grep for the
+     specific behaviors the user requested.
+
+2. Security & Robustness (weight 25%)
+   - Obvious vulnerabilities (eval on untrusted input, hardcoded secrets,
+     SQL injection, unsafe deserialization)?
+   - Error handling appropriate (specific exceptions, no bare `except: pass`)?
+   - Verify: grep for eval(, exec(, `except:`, pickle.loads, hardcoded
+     credentials.
+
+3. Performance & Efficiency (weight 20%)
+   - Reasonable algorithmic complexity for the inputs implied by the request?
+   - Idiomatic use of sets/dicts for lookups; no redundant loops or I/O?
+   - Verify: cat the implementation and reason about the hot path.
+
+4. Pythonic Idioms & Best Practices (weight 15%)
+   - PEP 8, modern features (f-strings, context managers, type hints) used
+     correctly where they fit. Judge only if the user implied
+     production-quality code.
+   - Verify: cat the files; check naming and structure.
+
+5. Maintainability & Cleanliness (weight 15%)
+   - Modular structure, useful docstrings, no dead code or unused imports.
+   - Verify: cat each file and skim for clarity.
 
 When you are confident, call FinishAction with a message whose FIRST LINE is
 exactly:
 
-  SCORE: <float between 0.0 and 1.0>
+  SCORE: <weighted average of the categories, between 0.0 and 1.0>
 
-followed by your reasoning on subsequent lines. Only give a high score if the
-task is fully and correctly completed.
+Followed by your reasoning on subsequent lines, including the per-category
+scores so the agent can see what to fix. The agent will be asked to refine
+its work whenever SCORE is below 0.7.
+
+Example final line: SCORE: 0.62
 """
+
+
+PYTHON_AGENT_SUFFIX = (
+    "This REPL is dedicated to Python coding tasks. Treat every user "
+    "request as a Python coding task: produce Python code that is correct, "
+    "secure, reasonably efficient, idiomatic, and maintainable. When the "
+    "user is implicit about style, default to PEP 8, type hints, and clear "
+    "naming. Verify your work (e.g. by reading the files you created or "
+    "running them) before calling FinishAction."
+)
 
 
 class IntentCritic(CriticBase):
@@ -230,7 +277,12 @@ def build_conversation() -> Conversation:
         ),
     )
 
-    agent = Agent(llm=llm, tools=main_tools, critic=critic)
+    agent = Agent(
+        llm=llm,
+        tools=main_tools,
+        critic=critic,
+        agent_context=AgentContext(system_message_suffix=PYTHON_AGENT_SUFFIX),
+    )
     conversation = Conversation(
         agent=agent,
         workspace=workspace,
@@ -248,9 +300,10 @@ def main() -> None:
 
     conversation = build_conversation()
     print(
-        "OpenHands critic refinement REPL.\n"
-        "Each message you send triggers the agent. When it calls FinishAction,\n"
-        "a fresh judge Conversation (read-only) scores the work 0.0-1.0.\n"
+        "OpenHands Python coding REPL with critic refinement.\n"
+        "Send a Python coding task. When the agent calls FinishAction,\n"
+        "a fresh judge Conversation (read-only) scores the work 0.0-1.0\n"
+        "across correctness, security, performance, idioms, and maintainability.\n"
         "Below 0.7 → the agent gets feedback and tries again (up to 3 times).\n"
         "Type /quit or /exit to leave.\n"
     )
