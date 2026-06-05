@@ -262,7 +262,7 @@ def build_conversation() -> Conversation:
         Tool(name=FileEditorTool.name),
         Tool(name=TaskTrackerTool.name),
     ]
-    judge_tools = [Tool(name=TerminalTool.name)]
+    judge_tools = [Tool(name=TerminalTool.name),Tool(name=TaskTrackerTool.name)]
 
     workspace = tempfile.mkdtemp(prefix="critic_demo_")
     print(f"📁 Workspace: {workspace}\n", flush=True)
