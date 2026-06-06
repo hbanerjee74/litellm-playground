@@ -22,6 +22,37 @@ from openhands.sdk import LLM, Agent, Conversation
 from openhands.sdk.security.confirmation_policy import NeverConfirm
 
 
+def print_status(conversation: Conversation, obot_url: str) -> None:
+    """Print the tools the agent has loaded from Obot.
+
+    Empty if the agent hasn't initialized yet — send a message first and
+    /status will populate. Reaching past tools_map into Obot's REST surface
+    (catalog list, per-user connection state) is a follow-up once the exact
+    REST paths are confirmed against a running Obot.
+    """
+    try:
+        conversation._ensure_agent_ready()  # noqa: SLF001 — playground sample
+    except Exception as exc:  # noqa: BLE001
+        print(f"(could not initialize agent: {exc})")
+        return
+
+    tools = sorted(conversation.agent.tools_map.keys())
+    print(f"\nObot URL: {obot_url}")
+    print(f"Tools exposed to agent ({len(tools)}):")
+    if not tools:
+        print("  (none — Obot reachable? Is Linear authorized in the admin UI?)")
+    else:
+        for name in tools:
+            print(f"  - {name}")
+    print()
+
+
+def print_connect_url(obot_url: str, connector: str) -> None:
+    """Print the deep-link URL into Obot's user-settings page for a connector."""
+    url = f"{obot_url}/user-settings/connectors/{connector}"
+    print(f"\nReconnect at: {url}\n")
+
+
 def main() -> None:
     load_dotenv()
 
@@ -67,7 +98,7 @@ def main() -> None:
         "OpenHands + Obot + Linear REPL.\n"
         f"Obot configured at: {obot_url}\n"
         "MCP tools from Obot are exposed to the agent as mcp__obot__*.\n"
-        "Slash commands: /quit, /exit.\n"
+        "Slash commands: /status, /connect <connector>, /quit, /exit.\n"
     )
 
     while True:
@@ -79,6 +110,16 @@ def main() -> None:
 
         if line in ("/quit", "/exit"):
             break
+        if line == "/status":
+            print_status(conversation, obot_url)
+            continue
+        if line.startswith("/connect "):
+            connector = line.split(" ", 1)[1].strip()
+            if connector:
+                print_connect_url(obot_url, connector)
+            else:
+                print("(usage: /connect <connector-name>, e.g. /connect linear)")
+            continue
         if not line:
             continue
 
