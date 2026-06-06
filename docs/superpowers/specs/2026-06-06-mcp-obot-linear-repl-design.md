@@ -102,9 +102,9 @@ The sample uses **Obot's embedded Postgres** (bundled inside the Obot image, pgv
 
 1. **Generate the encryption-config YAML for Obot** (lives in `${DATA_DIR}/keys/`, mounted into the Obot container; see lock-in #8 for the centralized key-management pattern):
    ```bash
-   mkdir -p ${HOME}/.obot/data/keys
+   mkdir -p $(pwd)/.obot/data/keys
    ENC_KEY=$(openssl rand -base64 32)
-   cat > ${HOME}/.obot/data/keys/obot-encryption.yaml <<EOF
+   cat > $(pwd)/.obot/data/keys/obot-encryption.yaml <<EOF
    apiVersion: apiserver.config.k8s.io/v1
    kind: EncryptionConfiguration
    resources:
@@ -124,7 +124,7 @@ The sample uses **Obot's embedded Postgres** (bundled inside the Obot image, pgv
                  secret: ${ENC_KEY}
          - identity: {}
    EOF
-   chmod 600 ${HOME}/.obot/data/keys/obot-encryption.yaml
+   chmod 600 $(pwd)/.obot/data/keys/obot-encryption.yaml
    ```
    Keep this file stable across `docker run` invocations — if the key changes, Obot can't decrypt previously stored OAuth refresh tokens. Rotation is the standard k8s `EncryptionConfiguration` two-key dance: prepend a new key as the primary, restart, run Obot's storage-rewrite job, then remove the old key.
 
@@ -132,7 +132,7 @@ The sample uses **Obot's embedded Postgres** (bundled inside the Obot image, pgv
    ```bash
    docker run -d --name obot -p 8080:8080 \
      -v /var/run/docker.sock:/var/run/docker.sock \
-     -v ${HOME}/.obot/data:/data \
+     -v $(pwd)/.obot/data:/data \
      -e OBOT_SERVER_ENABLE_AUTHENTICATION=true \
      -e OBOT_ENABLE_AGENTS=false \
      -e OBOT_BOOTSTRAP_TOKEN=<bootstrap-token> \
@@ -150,12 +150,12 @@ The sample uses **Obot's embedded Postgres** (bundled inside the Obot image, pgv
    ```
    Notes (every env var here is locked-in per lock-in #7 except deployment-target deltas listed in that lock-in):
    - **No `OBOT_SERVER_DSN`** — Obot uses its embedded Postgres (pgvector preinstalled). Production swaps to `OBOT_SERVER_DSN=postgres://...studio-postgres:5432/obot...` per lock-ins #1–4.
-   - **`-v ${HOME}/.obot/data:/data`** persists the embedded PG data dir across container restarts (critical — the encryption key only works against the data it was used to encrypt).
+   - **`-v $(pwd)/.obot/data:/data`** persists the embedded PG data dir across container restarts (critical — the encryption key only works against the data it was used to encrypt).
    - **`OBOT_SERVER_HOSTNAME=http://localhost:8080`** — must match the browser-reachable URL for OAuth redirects. Production overrides to the customer's user-browser-reachable URL.
    - **`OBOT_SERVER_ENCRYPTION_PROVIDER=custom` + `OBOT_SERVER_ENCRYPTION_CONFIG_FILE=/data/keys/obot-encryption.yaml`** — encrypts OAuth tokens, DCR client secrets, and other sensitive resources at rest in Postgres. The file approach (vs the inline `OBOT_SERVER_ENCRYPTION_KEY` env var) keeps the key out of process env dumps, supports k8s-style two-key rotation natively, and matches the centralized key-management pattern in lock-in #8.
    - **`OBOT_SERVER_MCPRUNTIME_BACKEND=docker`** — experiment runs on local Docker; AKS production switches to `kubernetes`.
    - **`OBOT_SERVER_ENABLE_REGISTRY_AUTH=true`** — registry API requires auth.
-   - **`OBOT_SERVER_AUDIT_LOGS_MODE=disk`** — Obot writes audit events to its `/data/audit` directory (under the same `-v ${HOME}/.obot/data:/data` mount). A Vibedata-owned shim reads from disk, translates Obot's audit schema into Studio's audit format per `audit-trail/README.md`, and writes into Studio's audit store. This is the production path for capturing gateway-internal events that Studio's REST-boundary audit doesn't see (silent token refreshes, OAuth handshake details). See lock-in #7's audit row and the audit-shim future extension.
+   - **`OBOT_SERVER_AUDIT_LOGS_MODE=disk`** — Obot writes audit events to its `/data/audit` directory (under the same `-v $(pwd)/.obot/data:/data` mount). A Vibedata-owned shim reads from disk, translates Obot's audit schema into Studio's audit format per `audit-trail/README.md`, and writes into Studio's audit store. This is the production path for capturing gateway-internal events that Studio's REST-boundary audit doesn't see (silent token refreshes, OAuth handshake details). See lock-in #7's audit row and the audit-shim future extension.
    - **`OBOT_SERVER_MCPOAUTH_CLIENT_EXPIRATION=90d`** — extends from Obot's `30d` default to reduce DCR re-registration churn (which can re-trigger user consent screens on the upstream providers).
    - **`OBOT_ENABLE_AGENTS=false`** disables Obot's chat/agent runtime explicitly (also the default for new deployments per Obot v0.22).
    - **No `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`** — Obot's chat client is off; OpenHands runs the LLM via Minimax/OpenRouter.
