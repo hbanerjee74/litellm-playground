@@ -16,5 +16,14 @@ __pycache__/
 .idea/
 .vscode/
 
-# Local Obot data dir (mounted into Obot container; contains encrypted PG state + key files)
-.obot/
+# Local Obot data dir (mounted into Obot container)
+# Layout under .obot/data/:
+#   postgresql/   embedded PG state — large, transient — ignored
+#   audit/        Obot audit JSONL logs                  — ignored
+#   keys/         bootstrap token, optional enc config   — contents ignored
+#                 but the README.md template is committed so contributors
+#                 know what files to generate locally.
+.obot/data/*
+!.obot/data/keys/
+.obot/data/keys/*
+!.obot/data/keys/README.md
