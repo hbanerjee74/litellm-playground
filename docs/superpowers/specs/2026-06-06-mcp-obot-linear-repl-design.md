@@ -95,43 +95,71 @@ A single file: `samples/mcp_obot_linear_repl.py`. Runnable directly via `uv run 
 
 ## Out-of-band setup the user does once before running
 
-1. **Provision an external Postgres database for Obot.** Required because Obot's embedded Postgres is not recommended for production and the sample tracks the Studio production deployment shape. Any Postgres 17 instance with `pgvector` available works — for the sample, a local `postgres:17` container with pgvector is sufficient:
-   ```bash
-   docker run -d --name obot-pg \
-     -e POSTGRES_USER=obot -e POSTGRES_PASSWORD=obot -e POSTGRES_DB=obot \
-     -p 5432:5432 pgvector/pgvector:pg17
-   ```
-   In Studio production, Obot reuses Studio's bundled Postgres image — provision a separate `obot` database inside the same cluster.
+The sample reuses Studio's bundled Postgres rather than spinning up a separate database. This mirrors the Studio production deployment shape and locks in the four design commitments enumerated under [Design lock-ins for Studio production](#design-lock-ins-for-studio-production) below.
 
-2. **Run Obot** (no LLM API key required — OpenHands runs the LLM, Obot is only the gateway; no embedded-DB volume mount required since we use external Postgres):
+1. **Swap Studio's Postgres image to `pgvector/pgvector:pg16`.** One-line change in `~/src/studio/docker-compose.yml`:
+   ```diff
+     postgres:
+       container_name: studio-postgres
+   -   image: postgres:16-alpine
+   +   image: pgvector/pgvector:pg16
+   ```
+   Same Postgres major version, identical credentials and volume, just the `vector` extension preinstalled at the OS package layer. Studio's existing `studio` database and schema are unaffected — `pgvector` is dormant until something runs `CREATE EXTENSION vector`. Restart Studio's compose: `docker compose down && docker compose up -d`.
+
+2. **Provision an `obot` database inside Studio's PG and enable the extension:**
    ```bash
-   docker run -d --name obot -p 8080:8080 \
+   docker exec -it studio-postgres psql -U postgres -d studio -c "CREATE DATABASE obot;"
+   docker exec -it studio-postgres psql -U postgres -d obot    -c "CREATE EXTENSION IF NOT EXISTS vector;"
+   ```
+   Idempotent — safe to re-run.
+
+3. **Run Obot on Studio's compose network** so it resolves `postgres` as the bundled PG via Docker DNS (same way Studio's own `api` service reaches the database):
+   ```bash
+   docker run -d --name obot \
+     --network vibedata_studio-net \
+     -p 8080:8080 \
      -v /var/run/docker.sock:/var/run/docker.sock \
      -e OBOT_SERVER_ENABLE_AUTHENTICATION=true \
      -e OBOT_ENABLE_AGENTS=false \
      -e OBOT_BOOTSTRAP_TOKEN=<bootstrap-token> \
-     -e OBOT_SERVER_DSN="postgres://obot:obot@host.docker.internal:5432/obot" \
+     -e OBOT_SERVER_DSN="postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/obot?sslmode=disable" \
      ghcr.io/obot-platform/obot:latest
    ```
    Notes:
-   - Obot's README defaults to including `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` because Obot ships a chat-client/agent component that needs a model provider. That component is unused in this sample — OpenHands runs the LLM (Minimax via OpenRouter); Obot only proxies MCP tool calls. Skipping the env var is fine.
-   - `OBOT_ENABLE_AGENTS=false` disables Obot's chat/agent runtime explicitly (also the default for new deployments per Obot v0.22). The gateway and MCP routing paths are unaffected. Makes the gateway-only intent unambiguous.
-   - `OBOT_SERVER_DSN` points Obot at the external Postgres. Standard libpq DSN format. The internal Postgres in the Obot image goes unused (cannot be removed but stays idle).
-   - `host.docker.internal` is the Docker-on-Mac/Windows hostname for the host network; on Linux substitute `--add-host=host.docker.internal:host-gateway` to the docker run command or use the bridge network's gateway IP.
-2. Open `http://localhost:8080`, sign in with the bootstrap token.
-3. In Obot's admin UI: configure an auth provider (use the local-dev provider for the sample), add Linear as a remote MCP, complete OAuth at Linear.
-4. Generate an API key for the developer user (exact UI path TBD; documented during impl).
-5. Add `OBOT_URL=http://localhost:8080` and `OBOT_API_KEY=<key>` to the playground's `.env`.
+   - `--network vibedata_studio-net` puts Obot on the same Docker network Studio's services use; `postgres` resolves to `studio-postgres` via Docker DNS. The exact network name is derived from Studio's compose project name `vibedata` (the project name shows up as the prefix) — verify with `docker network ls | grep studio-net` and adjust if the prefix differs locally.
+   - `OBOT_SERVER_DSN` uses the existing Studio `POSTGRES_PASSWORD` and the new `obot` database in the shared cluster. The internal Postgres in the Obot image goes unused.
+   - `OBOT_ENABLE_AGENTS=false` disables Obot's chat/agent runtime explicitly (also the default for new deployments per Obot v0.22). The gateway and MCP routing paths are unaffected.
+   - No `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` — Obot's chat client is off; OpenHands runs the LLM via Minimax/OpenRouter.
+   - `-p 8080:8080` exposes Obot's HTTP surface to the host so the sample script and Obot's UI work from your machine. Studio production drops this — Studio's backend reaches Obot via the network at `http://obot:8080` instead.
+
+4. Open `http://localhost:8080`, sign in with the bootstrap token.
+
+5. In Obot's admin UI: configure an auth provider (use the local-dev provider for the sample), add Linear as a remote MCP, complete OAuth at Linear.
+
+6. Generate an API key for the developer user (exact UI path TBD; documented during impl).
+
+7. Add `OBOT_URL=http://localhost:8080` and `OBOT_API_KEY=<key>` to the playground's `.env`.
 
 Optional, for OTel:
 
-6. Run a local OTLP collector:
+8. Run a local OTLP collector:
    ```bash
    docker run -d --name jaeger -p 4317:4317 -p 4318:4318 -p 16686:16686 \
      jaegertracing/all-in-one:latest
    ```
-7. Add `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` to `.env`.
-8. Visit `http://localhost:16686` after running the REPL to view linked traces.
+9. Add `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` to `.env`.
+10. Visit `http://localhost:16686` after running the REPL to view linked traces.
+
+## Design lock-ins for Studio production
+
+Building the sample this way commits Studio to four production-design decisions, all reversible but worth being explicit about:
+
+1. **Studio's bundled PG image is `pgvector/pgvector:pg16`** going forward. Anyone needing vector features (Obot today, possibly other Studio features later) runs `CREATE EXTENSION vector` in their own database. Same Postgres major; trivial migration cost.
+2. **Shared PG cluster, separate database per service.** Obot gets an `obot` database alongside Studio's existing `studio` database in the same cluster. No second Postgres deployment. Backups and migrations treat `obot` as a peer.
+3. **Obot deploys as a sidecar in Studio's compose project.** Reached at `http://obot:8080/mcp` by Studio's backend over `studio-net`; not exposed externally. Studio's frontend never talks to Obot directly.
+4. **`POSTGRES_PASSWORD` reused across the cluster.** Same superuser for both databases for now. If finer-grained isolation matters later, provision an `obot` role with grants only on the `obot` database — small follow-up that doesn't break this design.
+
+The sample is the test bed for these commitments. If anything proves wrong during implementation (e.g., Obot has an undocumented PG17 dependency we hit on migrations), we adjust before this lands in Studio.
 
 ## Error handling
 
