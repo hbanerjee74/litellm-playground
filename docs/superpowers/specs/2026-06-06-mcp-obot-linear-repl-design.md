@@ -159,7 +159,8 @@ The sample uses **Obot's embedded Postgres** (bundled inside the Obot image, pgv
    - **`OBOT_SERVER_MCPOAUTH_CLIENT_EXPIRATION=90d`** — extends from Obot's `30d` default to reduce DCR re-registration churn (which can re-trigger user consent screens on the upstream providers).
    - **`OBOT_ENABLE_AGENTS=false`** disables Obot's chat/agent runtime explicitly (also the default for new deployments per Obot v0.22).
    - **No `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`** — Obot's chat client is off; OpenHands runs the LLM via Minimax/OpenRouter.
-   - **No `OBOT_SERVER_AUTH_OWNER_EMAILS`** — Studio drives Obot admin operations via the bootstrap token followed by a `studio-system` service-account API key (see lock-in #7).
+   - **`OBOT_SERVER_FORCE_ENABLE_BOOTSTRAP=true`** — keeps the bootstrap token valid indefinitely. In local mode (per lock-in #10), the bootstrap token IS the developer's auth — no provider is configured, no other admin user exists. Without this flag, the moment any other admin user landed, the bootstrap token would silently stop working.
+   - **No `OBOT_SERVER_AUTH_OWNER_EMAILS`** — local mode has no auth provider; emails are irrelevant. Production may optionally populate this with `vibedata_owner` emails so they auto-receive Owner role on GitHub signin, but it's not load-bearing because nginx blocks Obot's UI externally anyway (lock-ins #3 + #10).
    - **`OBOT_SERVER_DISALLOW_LOCALHOST_MCP`** and **`OBOT_SERVER_MCPDEFAULT_DENY_ALL_EGRESS`** left at defaults — irrelevant to a federation-only deployment; documented in lock-in #7.
    - **No `GITHUB_AUTH_TOKEN`** — public catalog repo and low pull volume don't hit GitHub's unauth rate limit.
 
