@@ -128,14 +128,13 @@ The sample uses **Obot's embedded Postgres** (bundled inside the Obot image, pgv
    ```
    Keep this file stable across `docker run` invocations — if the key changes, Obot can't decrypt previously stored OAuth refresh tokens. Rotation is the standard k8s `EncryptionConfiguration` two-key dance: prepend a new key as the primary, restart, run Obot's storage-rewrite job, then remove the old key.
 
-2. **Run Obot** with the production-target configuration applied to the experiment:
+2. **Run Obot** with the production-target configuration applied to the experiment. **`OBOT_BOOTSTRAP_TOKEN` is omitted on purpose** — Obot self-generates a random token on first launch and prints it to logs (see step 2a below). If you prefer to pin a specific value, pre-export `BOOTSTRAP_TOKEN=$(openssl rand -hex 32)` and add `-e OBOT_BOOTSTRAP_TOKEN="$BOOTSTRAP_TOKEN"` to the command:
    ```bash
    docker run -d --name obot -p 8080:8080 \
      -v /var/run/docker.sock:/var/run/docker.sock \
      -v $(pwd)/.obot/data:/data \
      -e OBOT_SERVER_ENABLE_AUTHENTICATION=true \
      -e OBOT_ENABLE_AGENTS=false \
-     -e OBOT_BOOTSTRAP_TOKEN=<bootstrap-token> \
      -e OBOT_SERVER_FORCE_ENABLE_BOOTSTRAP=true \
      -e OBOT_SERVER_HOSTNAME=http://localhost:8080 \
      -e OBOT_SERVER_ENCRYPTION_PROVIDER=custom \
@@ -148,6 +147,18 @@ The sample uses **Obot's embedded Postgres** (bundled inside the Obot image, pgv
      -e OBOT_SERVER_DISABLE_UPDATE_CHECK=true \
      ghcr.io/obot-platform/obot:latest
    ```
+
+2a. **Retrieve the auto-generated bootstrap token from Obot's logs:**
+   ```bash
+   docker logs obot 2>&1 | grep -A 1 "Bootstrap Token"
+   ```
+   Output looks like:
+   ```
+   -----------------------------------------------
+   | Bootstrap Token: a1b2c3d4...                |
+   -----------------------------------------------
+   ```
+   Copy the value after `Bootstrap Token:` — you'll need it for step 5b and to sign in via the admin UI in step 3. Obot persists this token in `./.obot/data/`, so it remains stable across container restarts.
    Notes (every env var here is locked-in per lock-in #7 except deployment-target deltas listed in that lock-in):
    - **No `OBOT_SERVER_DSN`** — Obot uses its embedded Postgres (pgvector preinstalled). Production swaps to `OBOT_SERVER_DSN=postgres://...studio-postgres:5432/obot...` per lock-ins #1–4.
    - **`-v $(pwd)/.obot/data:/data`** persists the embedded PG data dir across container restarts (critical — the encryption key only works against the data it was used to encrypt).
