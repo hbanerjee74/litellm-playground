@@ -95,15 +95,29 @@ A single file: `samples/mcp_obot_linear_repl.py`. Runnable directly via `uv run 
 
 ## Out-of-band setup the user does once before running
 
-1. **Run Obot:**
+1. **Provision an external Postgres database for Obot.** Required because Obot's embedded Postgres is not recommended for production and the sample tracks the Studio production deployment shape. Any Postgres 17 instance with `pgvector` available works — for the sample, a local `postgres:17` container with pgvector is sufficient:
+   ```bash
+   docker run -d --name obot-pg \
+     -e POSTGRES_USER=obot -e POSTGRES_PASSWORD=obot -e POSTGRES_DB=obot \
+     -p 5432:5432 pgvector/pgvector:pg17
+   ```
+   In Studio production, Obot reuses Studio's bundled Postgres image — provision a separate `obot` database inside the same cluster.
+
+2. **Run Obot** (no LLM API key required — OpenHands runs the LLM, Obot is only the gateway; no embedded-DB volume mount required since we use external Postgres):
    ```bash
    docker run -d --name obot -p 8080:8080 \
      -v /var/run/docker.sock:/var/run/docker.sock \
-     -e OPENAI_API_KEY=$OPENAI_API_KEY \
      -e OBOT_SERVER_ENABLE_AUTHENTICATION=true \
+     -e OBOT_ENABLE_AGENTS=false \
      -e OBOT_BOOTSTRAP_TOKEN=<bootstrap-token> \
+     -e OBOT_SERVER_DSN="postgres://obot:obot@host.docker.internal:5432/obot" \
      ghcr.io/obot-platform/obot:latest
    ```
+   Notes:
+   - Obot's README defaults to including `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` because Obot ships a chat-client/agent component that needs a model provider. That component is unused in this sample — OpenHands runs the LLM (Minimax via OpenRouter); Obot only proxies MCP tool calls. Skipping the env var is fine.
+   - `OBOT_ENABLE_AGENTS=false` disables Obot's chat/agent runtime explicitly (also the default for new deployments per Obot v0.22). The gateway and MCP routing paths are unaffected. Makes the gateway-only intent unambiguous.
+   - `OBOT_SERVER_DSN` points Obot at the external Postgres. Standard libpq DSN format. The internal Postgres in the Obot image goes unused (cannot be removed but stays idle).
+   - `host.docker.internal` is the Docker-on-Mac/Windows hostname for the host network; on Linux substitute `--add-host=host.docker.internal:host-gateway` to the docker run command or use the bridge network's gateway IP.
 2. Open `http://localhost:8080`, sign in with the bootstrap token.
 3. In Obot's admin UI: configure an auth provider (use the local-dev provider for the sample), add Linear as a remote MCP, complete OAuth at Linear.
 4. Generate an API key for the developer user (exact UI path TBD; documented during impl).
