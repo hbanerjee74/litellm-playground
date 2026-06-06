@@ -38,6 +38,10 @@ def make_oauth_banner_callback(obot_url: str):
     specific reconnect URL regardless of how the agent phrases the error.
     """
     def cb(event) -> None:
+        # Assumes Event's __str__ includes observation text. Verified at Task 5
+        # manual run; if it turns out OpenHands' Event __str__ elides the
+        # observation, swap to checking event.observation / event.content /
+        # event.text or similar typed attribute.
         text = str(event)
         if not _OAUTH_PATTERN.search(text):
             return
