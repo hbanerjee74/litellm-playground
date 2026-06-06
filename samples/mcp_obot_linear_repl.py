@@ -35,8 +35,8 @@ def main() -> None:
     obot_api_key = os.environ.get("OBOT_API_KEY")
     if not obot_api_key:
         raise SystemExit(
-            "OBOT_API_KEY is not set. Generate an API key in Obot's admin UI "
-            "(http://localhost:8080) and add it to .env. See "
+            f"OBOT_API_KEY is not set. Generate an API key in Obot's admin UI "
+            f"({obot_url}) and add it to .env. See "
             "docs/superpowers/specs/2026-06-06-mcp-obot-linear-repl-design.md "
             "for full out-of-band setup steps."
         )
