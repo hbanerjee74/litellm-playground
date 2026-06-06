@@ -16,6 +16,8 @@ import tempfile
 from dotenv import load_dotenv
 from pydantic import SecretStr
 
+from fastmcp.mcp_config import MCPConfig
+
 from openhands.sdk import LLM, Agent, Conversation
 from openhands.sdk.security.confirmation_policy import NeverConfirm
 
@@ -30,13 +32,31 @@ def main() -> None:
     )
 
     obot_url = os.environ.get("OBOT_URL", "http://localhost:8080")
+    obot_api_key = os.environ.get("OBOT_API_KEY")
+    if not obot_api_key:
+        raise SystemExit(
+            "OBOT_API_KEY is not set. Generate an API key in Obot's admin UI "
+            "(http://localhost:8080) and add it to .env. See "
+            "docs/superpowers/specs/2026-06-06-mcp-obot-linear-repl-design.md "
+            "for full out-of-band setup steps."
+        )
 
     llm = LLM(
         model="openrouter/z-ai/glm-5.1",
         api_key=SecretStr(os.environ["OPENROUTER_API_KEY"]),
         base_url="https://openrouter.ai/api/v1",
     )
-    agent = Agent(llm=llm)
+    mcp_config = MCPConfig.model_validate({
+        "mcpServers": {
+            "obot": {
+                "transport": "streamable-http",
+                "url": f"{obot_url}/mcp",
+                "headers": {"Authorization": f"Bearer {obot_api_key}"},
+            }
+        }
+    })
+
+    agent = Agent(llm=llm, mcp_config=mcp_config)
     conversation = Conversation(
         agent=agent,
         workspace=tempfile.mkdtemp(prefix="obot_demo_"),
@@ -46,8 +66,8 @@ def main() -> None:
     print(
         "OpenHands + Obot + Linear REPL.\n"
         f"Obot configured at: {obot_url}\n"
-        "Send a message to the agent. Slash commands: /quit, /exit.\n"
-        "(MCP wiring lands in Task 2; this skeleton has no Obot tools.)\n"
+        "MCP tools from Obot are exposed to the agent as mcp__obot__*.\n"
+        "Slash commands: /quit, /exit.\n"
     )
 
     while True:
