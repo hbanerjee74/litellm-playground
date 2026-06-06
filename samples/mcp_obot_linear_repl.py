@@ -113,8 +113,8 @@ def main() -> None:
         if line == "/status":
             print_status(conversation, obot_url)
             continue
-        if line.startswith("/connect "):
-            connector = line.split(" ", 1)[1].strip()
+        if line == "/connect" or line.startswith("/connect "):
+            connector = line[len("/connect"):].strip()
             if connector:
                 print_connect_url(obot_url, connector)
             else:
