@@ -10,6 +10,7 @@ Obot's admin UI before this sample is useful).
 from __future__ import annotations
 
 import os
+import re
 import signal
 import tempfile
 
@@ -20,6 +21,36 @@ from fastmcp.mcp_config import MCPConfig
 
 from openhands.sdk import LLM, Agent, Conversation
 from openhands.sdk.security.confirmation_policy import NeverConfirm
+
+
+_OAUTH_PATTERN = re.compile(
+    r"\b(401|Unauthorized|OAuth|token\s+expired|consent\s+required|invalid_token)\b",
+    re.IGNORECASE,
+)
+
+
+def make_oauth_banner_callback(obot_url: str):
+    """Build a Conversation callback that prints an OAuth reconnect banner
+    when a tool observation contains an OAuth-class failure string.
+
+    The agent still sees the same observation in its history and may surface
+    the failure in its own response — the banner exists so the user sees the
+    specific reconnect URL regardless of how the agent phrases the error.
+    """
+    def cb(event) -> None:
+        text = str(event)
+        if not _OAUTH_PATTERN.search(text):
+            return
+        url = f"{obot_url}/user-settings/connectors/linear"
+        print()
+        print("─" * 60)
+        print("⚠  Linear OAuth needs attention for this user.")
+        print(f"Reconnect at: {url}")
+        print("After reconnecting, type your request again in this REPL.")
+        print("─" * 60)
+        print()
+
+    return cb
 
 
 def print_status(conversation: Conversation, obot_url: str) -> None:
@@ -91,6 +122,7 @@ def main() -> None:
     conversation = Conversation(
         agent=agent,
         workspace=tempfile.mkdtemp(prefix="obot_demo_"),
+        callbacks=[make_oauth_banner_callback(obot_url)],
     )
     conversation.set_confirmation_policy(NeverConfirm())
 
