@@ -84,8 +84,19 @@ A single file: `samples/mcp_obot_linear_repl.py`. Runnable directly via `uv run 
    - `> ` prompt.
    - `/quit` / `/exit` / EOF / `KeyboardInterrupt` → exit.
    - `/status` → `obot_status()`.
+   - `/connect <connector>` → print the reconnect URL for the named connector (e.g. `http://localhost:8080/user-settings/connectors/linear`). No in-band OAuth driving; the URL points the user at Obot's existing user-settings flow. Used both proactively and as the diagnostic the sample prints automatically when it detects an OAuth-class tool failure (see [Error handling](#error-handling)).
    - Empty line → continue.
    - Anything else → `conversation.send_message(line)` + `conversation.run()`.
+
+7. **`print_oauth_banner_on_failure(event)` callback.** Registered as a `Conversation` callback. Inspects every `ObservationEvent`; when the observation text matches OAuth-class failure patterns (`401`, `Unauthorized`, `OAuth`, `token expired`, `consent required`, `invalid_token`), prints a prominent banner above the agent's normal output:
+   ```
+   ────────────────────────────────────────────────────────
+   ⚠  Linear OAuth needs attention for this user.
+   Reconnect at: http://localhost:8080/user-settings/connectors/linear
+   After reconnecting, type your request again in this REPL.
+   ────────────────────────────────────────────────────────
+   ```
+   The agent itself also sees the failure in its observation history and can surface it in its own response, but the banner guarantees the user sees the specific URL regardless of how the agent phrases its message.
 
 ### File layout impact
 
@@ -95,71 +106,53 @@ A single file: `samples/mcp_obot_linear_repl.py`. Runnable directly via `uv run 
 
 ## Out-of-band setup the user does once before running
 
-The sample reuses Studio's bundled Postgres rather than spinning up a separate database. This mirrors the Studio production deployment shape and locks in the four design commitments enumerated under [Design lock-ins for Studio production](#design-lock-ins-for-studio-production) below.
+The sample uses **Obot's embedded Postgres** (bundled inside the Obot image, pgvector preinstalled). No standalone PG container, no modification to Studio's compose. This is the minimum-friction deployment for the experiment; the production deployment shape — swapping Studio's PG image and sharing the cluster — is captured under [Design lock-ins for Studio production](#design-lock-ins-for-studio-production) as the target Studio will move to once this approach is validated.
 
-1. **Swap Studio's Postgres image to `pgvector/pgvector:pg16`.** One-line change in `~/src/studio/docker-compose.yml`:
-   ```diff
-     postgres:
-       container_name: studio-postgres
-   -   image: postgres:16-alpine
-   +   image: pgvector/pgvector:pg16
-   ```
-   Same Postgres major version, identical credentials and volume, just the `vector` extension preinstalled at the OS package layer. Studio's existing `studio` database and schema are unaffected — `pgvector` is dormant until something runs `CREATE EXTENSION vector`. Restart Studio's compose: `docker compose down && docker compose up -d`.
-
-2. **Provision an `obot` database inside Studio's PG and enable the extension:**
+1. **Run Obot** (LLM API key not required — OpenHands runs the LLM, Obot is only the gateway):
    ```bash
-   docker exec -it studio-postgres psql -U postgres -d studio -c "CREATE DATABASE obot;"
-   docker exec -it studio-postgres psql -U postgres -d obot    -c "CREATE EXTENSION IF NOT EXISTS vector;"
-   ```
-   Idempotent — safe to re-run.
-
-3. **Run Obot on Studio's compose network** so it resolves `postgres` as the bundled PG via Docker DNS (same way Studio's own `api` service reaches the database):
-   ```bash
-   docker run -d --name obot \
-     --network vibedata_studio-net \
-     -p 8080:8080 \
+   docker run -d --name obot -p 8080:8080 \
      -v /var/run/docker.sock:/var/run/docker.sock \
+     -v ${HOME}/.obot/data:/data \
      -e OBOT_SERVER_ENABLE_AUTHENTICATION=true \
      -e OBOT_ENABLE_AGENTS=false \
      -e OBOT_BOOTSTRAP_TOKEN=<bootstrap-token> \
-     -e OBOT_SERVER_DSN="postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/obot?sslmode=disable" \
      ghcr.io/obot-platform/obot:latest
    ```
    Notes:
-   - `--network vibedata_studio-net` puts Obot on the same Docker network Studio's services use; `postgres` resolves to `studio-postgres` via Docker DNS. The exact network name is derived from Studio's compose project name `vibedata` (the project name shows up as the prefix) — verify with `docker network ls | grep studio-net` and adjust if the prefix differs locally.
-   - `OBOT_SERVER_DSN` uses the existing Studio `POSTGRES_PASSWORD` and the new `obot` database in the shared cluster. The internal Postgres in the Obot image goes unused.
+   - No `OBOT_SERVER_DSN` — without it, Obot uses its embedded Postgres (running inside the container). pgvector is already installed in the embedded image; no extra provisioning needed.
+   - The `-v ${HOME}/.obot/data:/data` mount persists the embedded PG's data dir across container restarts. Drop the mount if you want a fully ephemeral experiment.
    - `OBOT_ENABLE_AGENTS=false` disables Obot's chat/agent runtime explicitly (also the default for new deployments per Obot v0.22). The gateway and MCP routing paths are unaffected.
    - No `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` — Obot's chat client is off; OpenHands runs the LLM via Minimax/OpenRouter.
-   - `-p 8080:8080` exposes Obot's HTTP surface to the host so the sample script and Obot's UI work from your machine. Studio production drops this — Studio's backend reaches Obot via the network at `http://obot:8080` instead.
 
-4. Open `http://localhost:8080`, sign in with the bootstrap token.
+2. Open `http://localhost:8080`, sign in with the bootstrap token.
 
-5. In Obot's admin UI: configure an auth provider (use the local-dev provider for the sample), add Linear as a remote MCP, complete OAuth at Linear.
+3. In Obot's admin UI: configure an auth provider (use the local-dev provider for the sample), add Linear as a remote MCP, complete OAuth at Linear.
 
-6. Generate an API key for the developer user (exact UI path TBD; documented during impl).
+4. Generate an API key for the developer user (exact UI path TBD; documented during impl).
 
-7. Add `OBOT_URL=http://localhost:8080` and `OBOT_API_KEY=<key>` to the playground's `.env`.
+5. Add `OBOT_URL=http://localhost:8080` and `OBOT_API_KEY=<key>` to the playground's `.env`.
 
 Optional, for OTel:
 
-8. Run a local OTLP collector:
+6. Run a local OTLP collector:
    ```bash
    docker run -d --name jaeger -p 4317:4317 -p 4318:4318 -p 16686:16686 \
      jaegertracing/all-in-one:latest
    ```
-9. Add `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` to `.env`.
-10. Visit `http://localhost:16686` after running the REPL to view linked traces.
+7. Add `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` to `.env`.
+8. Visit `http://localhost:16686` after running the REPL to view linked traces.
 
 ## Design lock-ins for Studio production
 
-Building the sample this way commits Studio to four production-design decisions, all reversible but worth being explicit about:
+The sample deliberately runs Obot against its **embedded Postgres** (bundled inside the Obot image) to keep Studio's existing `~/src/studio/docker-compose.yml` untouched during the experiment. The decisions below are the Studio production target the sample is validating — they are **not** the experiment's deployment shape, but they are the commitments to bake into Studio once the sample proves the approach end-to-end.
 
-1. **Studio's bundled PG image is `pgvector/pgvector:pg16`** going forward. Anyone needing vector features (Obot today, possibly other Studio features later) runs `CREATE EXTENSION vector` in their own database. Same Postgres major; trivial migration cost.
-2. **Shared PG cluster, separate database per service.** Obot gets an `obot` database alongside Studio's existing `studio` database in the same cluster. No second Postgres deployment. Backups and migrations treat `obot` as a peer.
-3. **Obot deploys as a sidecar in Studio's compose project.** Reached at `http://obot:8080/mcp` by Studio's backend over `studio-net`; not exposed externally. Studio's frontend never talks to Obot directly.
+1. **Studio's bundled PG image swaps from `postgres:16-alpine` to `pgvector/pgvector:pg16`** in `~/src/studio/docker-compose.yml`. Same Postgres major version, identical credentials and volume, just the `vector` extension preinstalled at the OS package layer. Studio's existing `studio` database and schema are unaffected. Anyone needing vector features (Obot, and potentially other Studio components later) runs `CREATE EXTENSION vector` in their own database. Trivial migration cost.
+2. **Shared PG cluster, separate database per service.** In production, Obot gets its own `obot` database in Studio's cluster (alongside the existing `studio` database). No second Postgres deployment. Backups and migrations treat `obot` as a peer. The experiment uses Obot's embedded PG instead; the production step is one `CREATE DATABASE obot` plus pointing Obot at the shared cluster via `OBOT_SERVER_DSN=postgres://...studio-postgres:5432/obot...`.
+3. **Obot deploys as a sidecar in Studio's compose project.** In production, Obot joins `studio-net` and is reached at `http://obot:8080/mcp` by Studio's backend; not exposed externally. Studio's frontend never talks to Obot directly. The sample exposes Obot on the host at `http://localhost:8080` only because the sample script and Obot's admin UI run from the developer's machine; this port-publish goes away in production.
 4. **`POSTGRES_PASSWORD` reused across the cluster.** Same superuser for both databases for now. If finer-grained isolation matters later, provision an `obot` role with grants only on the `obot` database — small follow-up that doesn't break this design.
+5. **OAuth is per-user; reconnect is out-of-band via Obot's user-settings UI.** Studio forces each user to OAuth-connect their own Linear (and other) accounts in their user settings before any agent action can use them. The Obot API key Studio's backend uses on the user's behalf identifies that user to Obot, and Obot scopes Linear's tokens to that user. If a tool call fails mid-conversation because of a Linear OAuth issue (token revoked, expired, consent re-required), Studio's UI deep-links the user to their user-settings reconnect flow rather than attempting an in-conversation OAuth handshake. After reconnecting, the user resumes the conversation and retries the request. No shared service-account model; no in-band OAuth driving from the agent runtime.
 
-The sample is the test bed for these commitments. If anything proves wrong during implementation (e.g., Obot has an undocumented PG17 dependency we hit on migrations), we adjust before this lands in Studio.
+The sample is the test bed for these commitments. If anything proves wrong during implementation (e.g., Obot has an undocumented PG17 dependency we hit on PG16 migrations, or the per-user reconnect flow surfaces unexpected UX gaps), we adjust before this lands in Studio.
 
 ## Error handling
 
@@ -169,8 +162,9 @@ The sample is the test bed for these commitments. If anything proves wrong durin
 | Obot unreachable at `OBOT_URL` | The first `conversation.run()` surfaces an MCP transport error from fastmcp. Sample catches and prints `(MCP connection failed: <err>) — is Obot running on {OBOT_URL}?`. REPL continues so the user can fix and retry. |
 | `OBOT_API_KEY` invalid / expired | Obot returns 401 on the MCP call. fastmcp raises. Sample prints `(Obot rejected the API key; regenerate one in the Obot UI)`. REPL continues. |
 | Linear not connected in Obot | The agent sees no Linear tools (or sees a stub if Obot advertises catalog entries regardless). Either is acceptable — the sample lets the LLM respond naturally. `/status` reveals the gap. |
-| Linear's upstream token expired | Tool call returns an MCP error from Obot. Sample lets the error propagate to the agent's working memory; the agent can surface the issue to the user. Remediation: reconnect Linear in Obot's UI. |
-| `/recap` / unknown slash command typed | Treated as a normal user message (no command parsing beyond `/quit`, `/exit`, `/status`). |
+| Linear's upstream token expired / revoked / consent required mid-conversation | Tool call returns an observation containing an OAuth-class error string. The `print_oauth_banner_on_failure` callback detects it and prints a prominent reconnect banner above the agent's normal output, pointing at `http://localhost:8080/user-settings/connectors/linear`. The observation also reaches the agent, which surfaces the failure in its own response (likely a `FinishAction` saying it couldn't access Linear). REPL stays alive; user reconnects in Obot's UI out of band and retypes the request — same shape Studio's UX will use (deep-link the user to user-settings, user retries). Per-user OAuth: only this user's tokens are involved; no other users' state is affected. |
+| `/connect <connector>` typed | Print the reconnect URL for the named connector (default Linear path: `http://localhost:8080/user-settings/connectors/linear`). No in-band OAuth. Diagnostic shortcut that produces the same URL the failure callback would print. |
+| Other slash command typed (e.g. `/recap`, `/foo`) | Treated as a normal user message (no command parsing beyond `/quit`, `/exit`, `/status`, `/connect`). |
 | `KeyboardInterrupt` at the prompt | Clean exit, no traceback. Matches the pattern from `samples/recap.py`. |
 | OTel SDK initialization fails (e.g., collector unreachable) | Sample logs a warning and continues without tracing. Never fatal. |
 
@@ -198,9 +192,11 @@ This is a playground sample. Verification is manual:
 
 1. `uv run python samples/mcp_obot_linear_repl.py` starts and prompts.
 2. Type `/status` — prints the connected MCPs and available tools. Confirms the MCP control plane is reachable.
-3. Type a real instruction (`Create a Linear issue in my Inbox project titled "test from sample"`). The agent should use a Linear tool through Obot and report success.
-4. If `OTEL_EXPORTER_OTLP_ENDPOINT` is set, visit the collector UI and confirm the trace shows OpenHands → Obot → Linear spans linked under one trace ID.
-5. `Ctrl-C` at the prompt exits cleanly; `/quit` / `/exit` exit cleanly.
+3. Type `/connect linear` — prints the reconnect URL (`http://localhost:8080/user-settings/connectors/linear`). Confirms the diagnostic shortcut works on demand.
+4. Type a real instruction (`Create a Linear issue in my Inbox project titled "test from sample"`). The agent uses a Linear tool through Obot and reports success.
+5. If `OTEL_EXPORTER_OTLP_ENDPOINT` is set, visit the collector UI and confirm the trace shows OpenHands → Obot → Linear spans linked under one trace ID.
+6. **OAuth recovery path.** Deliberately break the Linear connection — easiest path is to revoke the OAuth grant in Linear's own connected-apps settings, or click Disconnect on Linear inside Obot's UI. Then retype the instruction from step 4. Expected: the tool call fails, the agent reports it couldn't access Linear, and the sample prints the OAuth reconnect banner pointing at `http://localhost:8080/user-settings/connectors/linear`. The REPL stays alive. Reconnect Linear in Obot's UI, retype the instruction, and confirm it succeeds. This validates the production UX path Studio will deep-link users into.
+7. `Ctrl-C` at the prompt exits cleanly; `/quit` / `/exit` exit cleanly.
 
 No automated tests. The playground does not have a test harness, and adding one for one sample is out of scope.
 
