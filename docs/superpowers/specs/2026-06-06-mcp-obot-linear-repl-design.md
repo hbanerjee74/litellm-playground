@@ -163,11 +163,22 @@ The sample uses **Obot's embedded Postgres** (bundled inside the Obot image, pgv
    - **`OBOT_SERVER_DISALLOW_LOCALHOST_MCP`** and **`OBOT_SERVER_MCPDEFAULT_DENY_ALL_EGRESS`** left at defaults — irrelevant to a federation-only deployment; documented in lock-in #7.
    - **No `GITHUB_AUTH_TOKEN`** — public catalog repo and low pull volume don't hit GitHub's unauth rate limit.
 
-3. Open `http://localhost:8080`, sign in with the bootstrap token.
+3. Open `http://localhost:8080`, sign in with the bootstrap token. Per lock-in #10 (local mode), **no auth provider is configured** — the bootstrap token is the developer's authentication, and `OBOT_SERVER_FORCE_ENABLE_BOOTSTRAP=true` keeps it valid indefinitely.
 
-4. In Obot's admin UI: configure an auth provider (use the local-dev provider for the sample), add Linear as a remote MCP, complete OAuth at Linear.
+4. In Obot's admin UI, add Linear as a remote MCP and complete its OAuth flow. The Linear refresh token is stored under the bootstrap user (the only Obot user that exists in local mode).
 
-5. Generate an API key for the developer user (exact UI path TBD; documented during impl).
+5. Mint an API key for the bootstrap user. Two equivalent paths:
+
+   **a) Via the UI** (one-time, ~30 seconds): click your profile → API Keys → Create API Key. Name it `studio-local`, select "All MCP Servers", no expiration. Copy the plaintext key.
+
+   **b) Via REST** (mirrors what Studio's installer does in production for local-mode deployments):
+   ```bash
+   curl -X POST http://localhost:8080/api/api-keys \
+     -H "Authorization: Bearer <bootstrap-token>" \
+     -H "Content-Type: application/json" \
+     -d '{"name": "studio-local", "mcpServerIds": ["*"], "canAccessSkills": false}'
+   ```
+   Response includes the plaintext key once. Capture it.
 
 6. Add `OBOT_URL=http://localhost:8080` and `OBOT_API_KEY=<key>` to the playground's `.env`.
 
