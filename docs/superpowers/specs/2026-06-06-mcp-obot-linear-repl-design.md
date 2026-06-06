@@ -238,6 +238,20 @@ The sample deliberately runs Obot against its **embedded Postgres** (bundled ins
 
 10. **Studio's auth model with Obot splits by deployment mode.** Two production-shipping modes, two auth surfaces, one shared evaluation harness (the sample we're building).
 
+   | Dimension | Local source / Docker (single dev) | K8s production (multi-user) |
+   |---|---|---|
+   | Auth providers configured | none | `github-auth-provider` (shared GitHub OAuth app across Studio + Obot) |
+   | Real users in Obot | 0 | 1 per Studio user, auto-provisioned on first GitHub signin |
+   | Synthetic users | 1 (`bootstrap`) | 1 (`bootstrap`, kept alive via `OBOT_SERVER_FORCE_ENABLE_BOOTSTRAP=true`) |
+   | API keys in play | 1, belongs to `bootstrap` | N, one per real user (auto-minted by Studio's backend on first Obot need) |
+   | Linear (or other OAuth-bearing) refresh tokens held by Obot | 1, granted by `bootstrap` | N, one per real user, scoped to that user |
+   | Per-user OAuth isolation (lock-in #5) | N/A — only one identity | Enforced — each user's MCP calls present their own refresh token to Linear |
+   | Bootstrap token's role | Developer's *only* credential — admin REST + Obot UI signin + minting the one API key | Deployment-level admin only — catalog enable/disable, key revocation, user listing. Studio's installer holds it; end users never see it |
+   | What Studio's backend sends on the MCP wire | `OBOT_API_KEY` from `.env` (the one bootstrap-minted key) | Per-user API key looked up in Studio's encrypted store, keyed on `{user_id, obot_instance_id}` |
+   | GitHub OAuth app | not required | required; one per deployment; shared between Studio and Obot |
+   | nginx fronting (lock-in #3) | not applied (sample exposes `localhost:8080` directly) | applied — only `/mcp` and required admin REST paths proxied; Obot UI not externally reachable |
+   | Sample validates this mode? | ✅ yes | ❌ no — separate follow-up sample |
+
    **Local source / local Docker mode (single developer):**
    - Obot runs with `OBOT_SERVER_ENABLE_AUTHENTICATION=true` and `OBOT_SERVER_FORCE_ENABLE_BOOTSTRAP=true`. No auth provider configured (no GitHub OAuth app required).
    - One-time per deployment: Studio's installer (or the developer running the sample today) hits Obot's bootstrap-token-authenticated `POST /api/api-keys` to mint one API key for the `bootstrap` user, scoped to all MCP servers (`"mcpServerIds": ["*"]`), no expiration.
