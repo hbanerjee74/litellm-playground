@@ -100,24 +100,25 @@ A single file: `samples/mcp_obot_linear_repl.py`. Runnable directly via `uv run 
 
 The sample uses **Obot's embedded Postgres** (bundled inside the Obot image, pgvector preinstalled). No standalone PG container, no modification to Studio's compose. This is the minimum-friction deployment for the experiment; the production deployment shape — swapping Studio's PG image and sharing the cluster — is captured under [Design lock-ins for Studio production](#design-lock-ins-for-studio-production) as the target Studio will move to once this approach is validated.
 
-1. **Generate the bootstrap token** into `${DATA_DIR}/keys/` (mounted into the Obot container; see lock-in #8 for the centralized credential pattern). Studio's installer follows this same pattern in production:
+1. **Generate the Obot bootstrap token into `.env`** (the same `.env` direnv loads — see step 6). The token is the credential Obot uses to recognize the developer as admin; the docker run command in step 2 reads it from your shell env (where direnv places it), and the curl command in step 5b reuses the same value.
+
    ```bash
-   mkdir -p $(pwd)/.obot/data/keys
-   openssl rand -hex 32 > $(pwd)/.obot/data/keys/obot-bootstrap-token
-   chmod 600 $(pwd)/.obot/data/keys/obot-bootstrap-token
+   echo "OBOT_BOOTSTRAP_TOKEN=$(openssl rand -hex 32)" >> .env
+   direnv reload   # makes $OBOT_BOOTSTRAP_TOKEN available in the current shell
    ```
-   Keep this file stable across `docker run` invocations — if the bootstrap token changes, the previously persisted one is invalidated (Obot persists whatever value is supplied at first launch).
 
-   **The sample does not configure encryption-at-rest** for the reason documented in lock-in #7's encryption rows: Obot v0.22.x's `custom` provider with `aescbc` is empirically broken in the postgres credential store. Production deployments will use a cloud-KMS provider (`aws`/`gcp`/`azure`) which paths through a different code branch. The encryption-config-YAML generation that previously lived in this step is captured in lock-in #8 as the production target only.
+   Keep this value stable across `docker run` invocations. Obot persists whatever it sees on first launch; changing the value later silently invalidates the previously-stored one.
 
-2. **Run Obot** with the production-target configuration applied to the experiment. The bootstrap token is read from the file generated in step 1, so the value is passed via env without ever appearing on the shell command line (matches how Studio's installer will source secrets from `${DATA_DIR}/keys/` in production):
+   **The sample does not configure encryption-at-rest** for the reason documented in lock-in #7's encryption rows: Obot v0.22.x's `custom` provider with `aescbc` is empirically broken in the postgres credential store. Production deployments will use a cloud-KMS provider (`aws`/`gcp`/`azure`) which paths through a different code branch. Production also reads secrets from `${DATA_DIR}/keys/` per lock-in #8 (Studio's installer pattern); local-mode sample takes the simpler `.env` route.
+
+2. **Run Obot.** `OBOT_BOOTSTRAP_TOKEN` is inherited from the shell env (direnv puts it there from `.env`); other Obot config is set inline. `-e OBOT_BOOTSTRAP_TOKEN` with no `=value` tells Docker to pass through the host's variable of that name.
    ```bash
    docker run -d --name obot -p 8080:8080 \
      -v /var/run/docker.sock:/var/run/docker.sock \
      -v $(pwd)/.obot/data:/data \
      -e OBOT_SERVER_ENABLE_AUTHENTICATION=true \
      -e OBOT_ENABLE_AGENTS=false \
-     -e OBOT_BOOTSTRAP_TOKEN="$(cat $(pwd)/.obot/data/keys/obot-bootstrap-token)" \
+     -e OBOT_BOOTSTRAP_TOKEN \
      -e OBOT_SERVER_FORCE_ENABLE_BOOTSTRAP=true \
      -e OBOT_SERVER_HOSTNAME=http://localhost:8080 \
      -e OBOT_SERVER_MCPRUNTIME_BACKEND=docker \
@@ -128,7 +129,7 @@ The sample uses **Obot's embedded Postgres** (bundled inside the Obot image, pgv
      -e OBOT_SERVER_DISABLE_UPDATE_CHECK=true \
      ghcr.io/obot-platform/obot:latest
    ```
-   To use the token later (signing into Obot's UI in step 3, calling REST in step 5b), read it back from the same file: `cat $(pwd)/.obot/data/keys/obot-bootstrap-token`.
+   To use the token later (signing into Obot's UI in step 3, calling REST in step 5b), reference `$OBOT_BOOTSTRAP_TOKEN` directly from your shell.
    Notes (every env var here is locked-in per lock-in #7 except deployment-target deltas listed in that lock-in):
    - **No `OBOT_SERVER_DSN`** — Obot uses its embedded Postgres (pgvector preinstalled). Production swaps to `OBOT_SERVER_DSN=postgres://...studio-postgres:5432/obot...` per lock-ins #1–4.
    - **`-v $(pwd)/.obot/data:/data`** persists the embedded PG data dir across container restarts (critical — the encryption key only works against the data it was used to encrypt).
@@ -155,9 +156,8 @@ The sample uses **Obot's embedded Postgres** (bundled inside the Obot image, pgv
 
    **b) Via REST** (mirrors what Studio's installer does in production for local-mode deployments):
    ```bash
-   BOOTSTRAP=$(cat $(pwd)/.obot/data/keys/obot-bootstrap-token)
-   curl -X POST http://localhost:8080/api/api-keys \
-     -H "Authorization: Bearer $BOOTSTRAP" \
+   curl -X POST $OBOT_URL/api/api-keys \
+     -H "Authorization: Bearer $OBOT_BOOTSTRAP_TOKEN" \
      -H "Content-Type: application/json" \
      -d '{"name": "studio-local", "mcpServerIds": ["*"], "canAccessSkills": false}'
    ```
