@@ -152,6 +152,8 @@ The sample deliberately runs Obot against its **embedded Postgres** (bundled ins
 4. **`POSTGRES_PASSWORD` reused across the cluster.** Same superuser for both databases for now. If finer-grained isolation matters later, provision an `obot` role with grants only on the `obot` database — small follow-up that doesn't break this design.
 5. **OAuth is per-user; reconnect is out-of-band via Obot's user-settings UI.** Studio forces each user to OAuth-connect their own Linear (and other) accounts in their user settings before any agent action can use them. The Obot API key Studio's backend uses on the user's behalf identifies that user to Obot, and Obot scopes Linear's tokens to that user. If a tool call fails mid-conversation because of a Linear OAuth issue (token revoked, expired, consent re-required), Studio's UI deep-links the user to their user-settings reconnect flow rather than attempting an in-conversation OAuth handshake. After reconnecting, the user resumes the conversation and retries the request. No shared service-account model; no in-band OAuth driving from the agent runtime.
 
+6. **Catalog source is `github.com/vibedata-official/mcp-catalog` (Vibedata-controlled), not Obot's upstream default.** Obot loads its MCP catalog from a Git repo at startup, controlled by `OBOT_SERVER_DEFAULT_MCPCATALOG_PATH` (default: `https://github.com/obot-platform/mcp-catalog`). Studio production overrides this to point at a Vibedata-curated catalog so editorial control over which MCP servers are visible to `vibedata_owner` admins stays with Vibedata. The configure-connectors invariant that "the catalog is the only source of connector identity" then composes naturally: Studio never invents catalog entries, Vibedata's curated repo does, and customers can't pull in arbitrary upstream MCPs without an editorial review. The system catalog (`OBOT_SERVER_DEFAULT_SYSTEM_MCPCATALOG_PATH`) is similarly pinned to Vibedata's equivalent. **The experiment uses Obot's upstream default catalog** so we can connect to Linear via the existing Docker MCP Catalog entry — switching to the Vibedata catalog is the next sample (see Future extensions).
+
 The sample is the test bed for these commitments. If anything proves wrong during implementation (e.g., Obot has an undocumented PG17 dependency we hit on PG16 migrations, or the per-user reconnect flow surfaces unexpected UX gaps), we adjust before this lands in Studio.
 
 ## Error handling
@@ -202,8 +204,9 @@ No automated tests. The playground does not have a test harness, and adding one 
 
 ## Future extensions (not in scope)
 
-- Multi-user OAuth demo (two test users, two parallel OpenHands conversations, distinct Linear identities). This is the next sample on the roadmap.
-- Per-intent allow-list filtering enforced by Obot. Studio concern.
-- ContextForge spike as a head-to-head with Obot. Vendor-comparison work, not pattern-evaluation work.
-- Replacing the REPL with a longer-running agent that drives a multi-step Linear workflow (issue → comment → state change). Useful but orthogonal.
-- TLS termination, persistence, multi-host deployment. All real Vibedata-as-product concerns; out of scope here.
+- **Vibedata-controlled catalog from a Git repo.** Follow-up sample that points Obot at `github.com/vibedata-official/mcp-catalog` via `OBOT_SERVER_DEFAULT_MCPCATALOG_PATH` (and the system equivalent), validates that the curated entries appear in `docker mcp catalog server ls` / Obot's admin UI and uncurated upstream entries do not, and runs a small lifecycle test (push a new entry to the catalog repo → restart Obot → entry appears; remove an entry → restart → entry withdraws). Exercises the editorial-control story Studio's `vibedata_owner` surface depends on. Locks in the catalog-repo URL, the system-catalog vs default-catalog separation, and the catalog-refresh ergonomics.
+- **Multi-user OAuth demo** (two test users, two parallel OpenHands conversations, distinct Linear identities). Validates the per-user OAuth lock-in (#5) end-to-end. Already on the roadmap.
+- **Per-intent allow-list filtering enforced by Obot.** Studio concern; reaches into the dispatcher's allowed-universe story.
+- **ContextForge spike as a head-to-head with Obot.** Vendor-comparison work, not pattern-evaluation work.
+- **Replacing the REPL with a longer-running agent** that drives a multi-step Linear workflow (issue → comment → state change). Useful but orthogonal.
+- **TLS termination, persistence, multi-host deployment.** All real Vibedata-as-product concerns; out of scope here.
