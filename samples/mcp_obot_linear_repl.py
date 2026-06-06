@@ -17,8 +17,6 @@ import tempfile
 from dotenv import load_dotenv
 from pydantic import SecretStr
 
-from fastmcp.mcp_config import MCPConfig
-
 from openhands.sdk import LLM, Agent, Conversation
 from openhands.sdk.security.confirmation_policy import NeverConfirm
 
@@ -112,7 +110,10 @@ def main() -> None:
         api_key=SecretStr(os.environ["OPENROUTER_API_KEY"]),
         base_url="https://openrouter.ai/api/v1",
     )
-    mcp_config = MCPConfig.model_validate({
+    # Agent accepts mcp_config as a raw dict in the fastmcp/MCPConfig schema;
+    # passing a validated MCPConfig instance fails Agent's pydantic validator
+    # in openhands-sdk 1.24.0 ("mcp_config must be a dictionary when provided").
+    mcp_config = {
         "mcpServers": {
             "obot": {
                 "transport": "streamable-http",
@@ -120,7 +121,7 @@ def main() -> None:
                 "headers": {"Authorization": f"Bearer {obot_api_key}"},
             }
         }
-    })
+    }
 
     agent = Agent(llm=llm, mcp_config=mcp_config)
     conversation = Conversation(
