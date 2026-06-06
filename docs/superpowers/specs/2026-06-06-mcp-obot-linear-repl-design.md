@@ -108,7 +108,13 @@ A single file: `samples/mcp_obot_linear_repl.py`. Runnable directly via `uv run 
 
 The sample uses **Obot's embedded Postgres** (bundled inside the Obot image, pgvector preinstalled). No standalone PG container, no modification to Studio's compose. This is the minimum-friction deployment for the experiment; the production deployment shape — swapping Studio's PG image and sharing the cluster — is captured under [Design lock-ins for Studio production](#design-lock-ins-for-studio-production) as the target Studio will move to once this approach is validated.
 
-1. **Run Obot** (LLM API key not required — OpenHands runs the LLM, Obot is only the gateway):
+1. **Generate the local encryption key** (used by `OBOT_SERVER_ENCRYPTION_PROVIDER=custom`):
+   ```bash
+   export OBOT_LOCAL_ENC_KEY=$(openssl rand -base64 32)
+   ```
+   Keep this stable across `docker run` invocations — if the key changes, Obot can't decrypt previously stored OAuth refresh tokens.
+
+2. **Run Obot** with the production-target configuration applied to the experiment:
    ```bash
    docker run -d --name obot -p 8080:8080 \
      -v /var/run/docker.sock:/var/run/docker.sock \
@@ -116,31 +122,49 @@ The sample uses **Obot's embedded Postgres** (bundled inside the Obot image, pgv
      -e OBOT_SERVER_ENABLE_AUTHENTICATION=true \
      -e OBOT_ENABLE_AGENTS=false \
      -e OBOT_BOOTSTRAP_TOKEN=<bootstrap-token> \
+     -e OBOT_SERVER_HOSTNAME=http://localhost:8080 \
+     -e OBOT_SERVER_ENCRYPTION_PROVIDER=custom \
+     -e OBOT_SERVER_ENCRYPTION_KEY=$OBOT_LOCAL_ENC_KEY \
+     -e OBOT_SERVER_MCPRUNTIME_BACKEND=docker \
+     -e OBOT_SERVER_ENABLE_REGISTRY_AUTH=true \
+     -e OBOT_SERVER_AUDIT_LOGS_MODE=disk \
+     -e OBOT_SERVER_AUDIT_LOGS_COMPRESS_FILE=false \
+     -e OBOT_SERVER_MCPOAUTH_CLIENT_EXPIRATION=90d \
+     -e OBOT_SERVER_DISABLE_UPDATE_CHECK=true \
      ghcr.io/obot-platform/obot:latest
    ```
-   Notes:
-   - No `OBOT_SERVER_DSN` — without it, Obot uses its embedded Postgres (running inside the container). pgvector is already installed in the embedded image; no extra provisioning needed.
-   - The `-v ${HOME}/.obot/data:/data` mount persists the embedded PG's data dir across container restarts. Drop the mount if you want a fully ephemeral experiment.
-   - `OBOT_ENABLE_AGENTS=false` disables Obot's chat/agent runtime explicitly (also the default for new deployments per Obot v0.22). The gateway and MCP routing paths are unaffected.
-   - No `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` — Obot's chat client is off; OpenHands runs the LLM via Minimax/OpenRouter.
+   Notes (every env var here is locked-in per lock-in #7 except deployment-target deltas listed in that lock-in):
+   - **No `OBOT_SERVER_DSN`** — Obot uses its embedded Postgres (pgvector preinstalled). Production swaps to `OBOT_SERVER_DSN=postgres://...studio-postgres:5432/obot...` per lock-ins #1–4.
+   - **`-v ${HOME}/.obot/data:/data`** persists the embedded PG data dir across container restarts (critical — the encryption key only works against the data it was used to encrypt).
+   - **`OBOT_SERVER_HOSTNAME=http://localhost:8080`** — must match the browser-reachable URL for OAuth redirects. Production overrides to the customer's user-browser-reachable URL.
+   - **`OBOT_SERVER_ENCRYPTION_PROVIDER=custom` + `OBOT_SERVER_ENCRYPTION_KEY=...`** — encrypts OAuth tokens and DCR client secrets at rest in Postgres. The key is operator-managed (in production: customer's secrets store).
+   - **`OBOT_SERVER_MCPRUNTIME_BACKEND=docker`** — experiment runs on local Docker; AKS production switches to `kubernetes`.
+   - **`OBOT_SERVER_ENABLE_REGISTRY_AUTH=true`** — registry API requires auth.
+   - **`OBOT_SERVER_AUDIT_LOGS_MODE=disk`** — Obot writes audit events to its `/data/audit` directory (under the same `-v ${HOME}/.obot/data:/data` mount). A Vibedata-owned shim reads from disk, translates Obot's audit schema into Studio's audit format per `audit-trail/README.md`, and writes into Studio's audit store. This is the production path for capturing gateway-internal events that Studio's REST-boundary audit doesn't see (silent token refreshes, OAuth handshake details). See lock-in #7's audit row and the audit-shim future extension.
+   - **`OBOT_SERVER_MCPOAUTH_CLIENT_EXPIRATION=90d`** — extends from Obot's `30d` default to reduce DCR re-registration churn (which can re-trigger user consent screens on the upstream providers).
+   - **`OBOT_ENABLE_AGENTS=false`** disables Obot's chat/agent runtime explicitly (also the default for new deployments per Obot v0.22).
+   - **No `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`** — Obot's chat client is off; OpenHands runs the LLM via Minimax/OpenRouter.
+   - **No `OBOT_SERVER_AUTH_OWNER_EMAILS`** — Studio drives Obot admin operations via the bootstrap token followed by a `studio-system` service-account API key (see lock-in #7).
+   - **`OBOT_SERVER_DISALLOW_LOCALHOST_MCP`** and **`OBOT_SERVER_MCPDEFAULT_DENY_ALL_EGRESS`** left at defaults — irrelevant to a federation-only deployment; documented in lock-in #7.
+   - **No `GITHUB_AUTH_TOKEN`** — public catalog repo and low pull volume don't hit GitHub's unauth rate limit.
 
-2. Open `http://localhost:8080`, sign in with the bootstrap token.
+3. Open `http://localhost:8080`, sign in with the bootstrap token.
 
-3. In Obot's admin UI: configure an auth provider (use the local-dev provider for the sample), add Linear as a remote MCP, complete OAuth at Linear.
+4. In Obot's admin UI: configure an auth provider (use the local-dev provider for the sample), add Linear as a remote MCP, complete OAuth at Linear.
 
-4. Generate an API key for the developer user (exact UI path TBD; documented during impl).
+5. Generate an API key for the developer user (exact UI path TBD; documented during impl).
 
-5. Add `OBOT_URL=http://localhost:8080` and `OBOT_API_KEY=<key>` to the playground's `.env`.
+6. Add `OBOT_URL=http://localhost:8080` and `OBOT_API_KEY=<key>` to the playground's `.env`.
 
 Optional, for OTel:
 
-6. Run a local OTLP collector:
+7. Run a local OTLP collector:
    ```bash
    docker run -d --name jaeger -p 4317:4317 -p 4318:4318 -p 16686:16686 \
      jaegertracing/all-in-one:latest
    ```
-7. Add `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` to `.env`.
-8. Visit `http://localhost:16686` after running the REPL to view linked traces.
+8. Add `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` to `.env`.
+9. Visit `http://localhost:16686` after running the REPL to view linked traces.
 
 ## Design lock-ins for Studio production
 
@@ -154,7 +178,30 @@ The sample deliberately runs Obot against its **embedded Postgres** (bundled ins
 
 6. **Catalog source is `github.com/vibedata-official/mcp-catalog` (Vibedata-controlled), not Obot's upstream default.** Obot loads its MCP catalog from a Git repo at startup, controlled by `OBOT_SERVER_DEFAULT_MCPCATALOG_PATH` (default: `https://github.com/obot-platform/mcp-catalog`). Studio production overrides this to point at a Vibedata-curated catalog so editorial control over which MCP servers are visible to `vibedata_owner` admins stays with Vibedata. The configure-connectors invariant that "the catalog is the only source of connector identity" then composes naturally: Studio never invents catalog entries, Vibedata's curated repo does, and customers can't pull in arbitrary upstream MCPs without an editorial review. The system catalog (`OBOT_SERVER_DEFAULT_SYSTEM_MCPCATALOG_PATH`) is similarly pinned to Vibedata's equivalent. **The experiment uses Obot's upstream default catalog** so we can connect to Linear via the existing Docker MCP Catalog entry — switching to the Vibedata catalog is the next sample (see Future extensions).
 
-The sample is the test bed for these commitments. If anything proves wrong during implementation (e.g., Obot has an undocumented PG17 dependency we hit on PG16 migrations, or the per-user reconnect flow surfaces unexpected UX gaps), we adjust before this lands in Studio.
+7. **Obot configuration knobs are locked-in per the table below.** Each line is set explicitly even when it matches Obot's default, so the Studio deployment manifest is self-documenting.
+
+   | Knob | Production value | Experiment value | Rationale |
+   |---|---|---|---|
+   | `OBOT_SERVER_ENABLE_AUTHENTICATION` | `true` | `true` | Multi-user gateway requires auth. |
+   | `OBOT_ENABLE_AGENTS` | `false` | `false` | Chat/agent runtime is out of scope; OpenHands owns the agent. Also the v0.22 default for new deployments. |
+   | `OBOT_BOOTSTRAP_TOKEN` | one-time, rotated after `studio-system` user provisioned | same | Bootstrap, then revoked or left dormant. |
+   | **No `OBOT_SERVER_AUTH_OWNER_EMAILS`** | unset | unset | Studio uses bootstrap token → provisions `studio-system` service-account user → API key for all subsequent admin operations. Human `vibedata_owner` admins live in Studio's IdP and never log into Obot's admin UI. |
+   | `OBOT_SERVER_HOSTNAME` | customer-domain URL reachable from end-user browsers (e.g. `https://studio.<customer>.com/obot`) | `http://localhost:8080` | Linear's consent screen redirects the user's browser to this URL — must be browser-reachable, not just backend-reachable. Set at launch, never derived. |
+   | `OBOT_SERVER_ENCRYPTION_PROVIDER` | `custom` | `custom` | OAuth refresh tokens + DCR client secrets encrypted at rest. Cloud-KMS providers (`aws`/`gcp`/`azure`) are also valid for hosted Vibedata; `custom` works for self-host. |
+   | `OBOT_SERVER_ENCRYPTION_KEY` | customer-managed via Vibedata secrets system | `openssl rand -base64 32`, stable across restarts | Stable key; rotating it invalidates all stored credentials. |
+   | `OBOT_SERVER_MCPRUNTIME_BACKEND` | `kubernetes` (AKS deployment) | `docker` (local Docker for the experiment) | Per-deployment-target, not a single value. AKS uses native k8s API + auto-provisioned ServiceAccount/Role. Docker Compose uses local daemon. |
+   | `OBOT_SERVER_ENABLE_REGISTRY_AUTH` | `true` | `true` | Registry API auth-gated; default `false` returns wildcard catalog reads to anyone. |
+   | `OBOT_SERVER_AUDIT_LOGS_MODE` | `disk` | `disk` | Obot writes structured audit events to `/data/audit/*.jsonl`. **A Vibedata-built audit shim** tails this directory, translates Obot's event schema into Studio's audit format per `~/src/worktrees/docs/configure-connectors-fs/docs/functional/audit-trail/README.md`, and writes into Studio's audit store. The shim runs as a sidecar in production and (eventually) as a follow-up sample in this playground. REST-boundary events stay captured by Studio directly; the shim adds the gateway-internal events (silent token refreshes, DCR re-registration, OAuth protocol exchanges) so Vibedata's audit trail is complete. We picked `disk` over `s3` to keep the storage local to the Obot pod (no cloud dependency for the audit path), and over `off` so we don't lose gateway-internal events. Obot doesn't expose an OTLP audit mode today; if it ships one we can revisit and remove the shim. |
+   | `OBOT_SERVER_AUDIT_LOGS_COMPRESS_FILE` | `false` (shim reads raw) | `false` | Disabled so the shim can tail JSONL line-by-line. The default `true` would compress rotated files, complicating tailing. Trade-off accepted (more disk usage) for simpler ingestion. |
+   | `OBOT_SERVER_MCPOAUTH_CLIENT_EXPIRATION` | `90d` | `90d` | Extended from Obot's `30d` default. Longer DCR client lifetime means fewer re-registrations against upstream providers, which means fewer user re-consent screens. Verify max-acceptable-lifetime against Linear/Atlassian/GitHub before going longer. |
+   | `OBOT_SERVER_DSN` | `postgres://...studio-postgres:5432/obot...` (per lock-ins #1-4) | unset (embedded PG) | External vs embedded; see lock-ins #1-4. |
+   | `OBOT_SERVER_DEFAULT_MCPCATALOG_PATH` / `OBOT_SERVER_DEFAULT_SYSTEM_MCPCATALOG_PATH` | `github.com/vibedata-official/mcp-catalog` (and system equivalent) | unset (Obot upstream defaults) | See lock-in #6. |
+   | `OBOT_SERVER_DISALLOW_LOCALHOST_MCP` | default (`false`) | default (`false`) | Federation-only catalog; no localhost endpoints in `vibedata-official` catalog by editorial policy. SSRF threat model collapses; flag adds no value. |
+   | `OBOT_SERVER_MCPDEFAULT_DENY_ALL_EGRESS` | default (`false`) | default (`false`) | Only relevant when Obot launches local MCP server containers, which the federation model never does. |
+   | `GITHUB_AUTH_TOKEN` | unset | unset | Public catalog repo, low pull volume, doesn't approach GitHub's 60/hour unauthenticated limit. Set only if Vibedata-hosted multi-tenant share an egress IP. |
+   | `OBOT_SERVER_DISABLE_UPDATE_CHECK` | `true` (privacy / airgap-friendly enterprise customers) | `true` | Disable phone-home update check. Default `false`; flipping is operator-friendly. |
+
+The sample is the test bed for these commitments. If anything proves wrong during implementation (e.g., Obot has an undocumented PG17 dependency we hit on PG16 migrations, the per-user reconnect flow surfaces UX gaps, or DCR re-registration triggers consent more aggressively than `90d` suggests), we adjust before this lands in Studio.
 
 ## Error handling
 
@@ -205,6 +252,8 @@ No automated tests. The playground does not have a test harness, and adding one 
 ## Future extensions (not in scope)
 
 - **Vibedata-controlled catalog from a Git repo.** Follow-up sample that points Obot at `github.com/vibedata-official/mcp-catalog` via `OBOT_SERVER_DEFAULT_MCPCATALOG_PATH` (and the system equivalent), validates that the curated entries appear in `docker mcp catalog server ls` / Obot's admin UI and uncurated upstream entries do not, and runs a small lifecycle test (push a new entry to the catalog repo → restart Obot → entry appears; remove an entry → restart → entry withdraws). Exercises the editorial-control story Studio's `vibedata_owner` surface depends on. Locks in the catalog-repo URL, the system-catalog vs default-catalog separation, and the catalog-refresh ergonomics.
+- **Obot audit-shim sample.** Self-contained Python utility (`samples/obot_audit_shim.py`) that tails `/data/audit/*.jsonl`, parses each Obot audit event, translates the schema into Studio's audit format per `~/src/worktrees/docs/configure-connectors-fs/docs/functional/audit-trail/README.md`, and writes into Studio's audit store (or stdout in dry-run mode). Demonstrates the production audit pipeline end-to-end: gateway-internal events → disk → translation → Studio audit store. Likely uses `watchdog` or simple polling for the tail loop. Validates the schema mapping before Studio's production sidecar gets built.
+- **Native OTLP mode for `OBOT_SERVER_AUDIT_LOGS_MODE` (upstream feature request).** Obot already wires up an OTel logger provider for operational logs; adding `otlp` as an audit-logs backend would let audit events flow through the same pipeline as traces and metrics, removing the disk-shim hop. File an upstream issue if/when Vibedata's audit pipeline benefits from collapsing the shim. Not the chosen path today (lock-in #7 picks `disk` + shim); track as a deferred optimization.
 - **Multi-user OAuth demo** (two test users, two parallel OpenHands conversations, distinct Linear identities). Validates the per-user OAuth lock-in (#5) end-to-end. Already on the roadmap.
 - **Per-intent allow-list filtering enforced by Obot.** Studio concern; reaches into the dispatcher's allowed-universe story.
 - **ContextForge spike as a head-to-head with Obot.** Vendor-comparison work, not pattern-evaluation work.
