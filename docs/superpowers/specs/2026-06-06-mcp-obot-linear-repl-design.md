@@ -100,39 +100,15 @@ A single file: `samples/mcp_obot_linear_repl.py`. Runnable directly via `uv run 
 
 The sample uses **Obot's embedded Postgres** (bundled inside the Obot image, pgvector preinstalled). No standalone PG container, no modification to Studio's compose. This is the minimum-friction deployment for the experiment; the production deployment shape — swapping Studio's PG image and sharing the cluster — is captured under [Design lock-ins for Studio production](#design-lock-ins-for-studio-production) as the target Studio will move to once this approach is validated.
 
-1. **Generate Obot's secrets** — encryption config YAML and bootstrap token — into `${DATA_DIR}/keys/` (mounted into the Obot container; see lock-in #8 for the centralized key-management pattern). Studio's installer follows this exact pattern in production:
+1. **Generate the bootstrap token** into `${DATA_DIR}/keys/` (mounted into the Obot container; see lock-in #8 for the centralized credential pattern). Studio's installer follows this same pattern in production:
    ```bash
    mkdir -p $(pwd)/.obot/data/keys
-
-   # Encryption config (per lock-in #8, Kubernetes EncryptionConfiguration format)
-   ENC_KEY=$(openssl rand -base64 32)
-   cat > $(pwd)/.obot/data/keys/obot-encryption.yaml <<EOF
-   apiVersion: apiserver.config.k8s.io/v1
-   kind: EncryptionConfiguration
-   resources:
-     - resources:
-         - credentials.obot.obot.ai
-         - users.obot.obot.ai
-         - identities.obot.obot.ai
-         - mcpoauthtokens.obot.obot.ai
-         - mcpoauthpendingstates.obot.obot.ai
-         - mcpauditlogs.obot.obot.ai
-         - policyviolations.obot.obot.ai
-         - properties.obot.obot.ai
-       providers:
-         - aescbc:
-             keys:
-               - name: vibedata-obot-key-1
-                 secret: ${ENC_KEY}
-         - identity: {}
-   EOF
-   chmod 600 $(pwd)/.obot/data/keys/obot-encryption.yaml
-
-   # Bootstrap token (admin credential — Studio's installer holds this in production)
    openssl rand -hex 32 > $(pwd)/.obot/data/keys/obot-bootstrap-token
    chmod 600 $(pwd)/.obot/data/keys/obot-bootstrap-token
    ```
-   Keep these files stable across `docker run` invocations — if the encryption key changes, Obot can't decrypt previously stored OAuth refresh tokens; if the bootstrap token changes, the previous one is invalidated (Obot persists whatever value is supplied at first launch). Rotation for the encryption key is the standard k8s `EncryptionConfiguration` two-key dance: prepend a new key as the primary, restart, run Obot's storage-rewrite job, then remove the old key.
+   Keep this file stable across `docker run` invocations — if the bootstrap token changes, the previously persisted one is invalidated (Obot persists whatever value is supplied at first launch).
+
+   **The sample does not configure encryption-at-rest** for the reason documented in lock-in #7's encryption rows: Obot v0.22.x's `custom` provider with `aescbc` is empirically broken in the postgres credential store. Production deployments will use a cloud-KMS provider (`aws`/`gcp`/`azure`) which paths through a different code branch. The encryption-config-YAML generation that previously lived in this step is captured in lock-in #8 as the production target only.
 
 2. **Run Obot** with the production-target configuration applied to the experiment. The bootstrap token is read from the file generated in step 1, so the value is passed via env without ever appearing on the shell command line (matches how Studio's installer will source secrets from `${DATA_DIR}/keys/` in production):
    ```bash
@@ -144,8 +120,6 @@ The sample uses **Obot's embedded Postgres** (bundled inside the Obot image, pgv
      -e OBOT_BOOTSTRAP_TOKEN="$(cat $(pwd)/.obot/data/keys/obot-bootstrap-token)" \
      -e OBOT_SERVER_FORCE_ENABLE_BOOTSTRAP=true \
      -e OBOT_SERVER_HOSTNAME=http://localhost:8080 \
-     -e OBOT_SERVER_ENCRYPTION_PROVIDER=custom \
-     -e OBOT_SERVER_ENCRYPTION_CONFIG_FILE=/data/keys/obot-encryption.yaml \
      -e OBOT_SERVER_MCPRUNTIME_BACKEND=docker \
      -e OBOT_SERVER_ENABLE_REGISTRY_AUTH=true \
      -e OBOT_SERVER_AUDIT_LOGS_MODE=disk \
@@ -159,7 +133,7 @@ The sample uses **Obot's embedded Postgres** (bundled inside the Obot image, pgv
    - **No `OBOT_SERVER_DSN`** — Obot uses its embedded Postgres (pgvector preinstalled). Production swaps to `OBOT_SERVER_DSN=postgres://...studio-postgres:5432/obot...` per lock-ins #1–4.
    - **`-v $(pwd)/.obot/data:/data`** persists the embedded PG data dir across container restarts (critical — the encryption key only works against the data it was used to encrypt).
    - **`OBOT_SERVER_HOSTNAME=http://localhost:8080`** — must match the browser-reachable URL for OAuth redirects. Production overrides to the customer's user-browser-reachable URL.
-   - **`OBOT_SERVER_ENCRYPTION_PROVIDER=custom` + `OBOT_SERVER_ENCRYPTION_CONFIG_FILE=/data/keys/obot-encryption.yaml`** — encrypts OAuth tokens, DCR client secrets, and other sensitive resources at rest in Postgres. The file approach (vs the inline `OBOT_SERVER_ENCRYPTION_KEY` env var) keeps the key out of process env dumps, supports k8s-style two-key rotation natively, and matches the centralized key-management pattern in lock-in #8.
+   - **No `OBOT_SERVER_ENCRYPTION_PROVIDER` / `_CONFIG_FILE`** in the sample — production uses a cloud-KMS provider (verified separately); `custom`/`aescbc` is empirically broken in Obot v0.22.x's postgres credential store. See lock-in #7 encryption rows for the production target and the upstream bug to file. Sample uses unencrypted storage; acceptable because data is on a single developer's machine.
    - **`OBOT_SERVER_MCPRUNTIME_BACKEND=docker`** — experiment runs on local Docker; AKS production switches to `kubernetes`.
    - **`OBOT_SERVER_ENABLE_REGISTRY_AUTH=true`** — registry API requires auth.
    - **`OBOT_SERVER_AUDIT_LOGS_MODE=disk`** — Obot writes audit events to its `/data/audit` directory (under the same `-v $(pwd)/.obot/data:/data` mount). A Vibedata-owned shim reads from disk, translates Obot's audit schema into Studio's audit format per `audit-trail/README.md`, and writes into Studio's audit store. This is the production path for capturing gateway-internal events that Studio's REST-boundary audit doesn't see (silent token refreshes, OAuth handshake details). See lock-in #7's audit row and the audit-shim future extension.
@@ -213,8 +187,8 @@ The sample deliberately runs Obot against its **embedded Postgres** (bundled ins
    | `OBOT_SERVER_FORCE_ENABLE_BOOTSTRAP` | `true` | `true` | Keeps the bootstrap token valid even after other admin users exist. Without this, the moment any non-bootstrap Owner user is provisioned (e.g., a customer's `vibedata_owner` who signs in via GitHub) the bootstrap token silently stops working — and Studio's installer-driven admin path would break. Worth the explicit lock-in. |
    | `OBOT_SERVER_AUTH_OWNER_EMAILS` | optional (populated with the customer's `vibedata_owner` emails so they auto-receive Owner role when they sign in via GitHub) | unset | Not load-bearing for Studio's admin REST (the bootstrap token covers that). Only useful if specific humans ever need direct Obot UI access for debugging — which nginx-front blocks externally anyway (lock-in #3). Documented as available; not required. |
    | `OBOT_SERVER_HOSTNAME` | customer-domain URL reachable from end-user browsers (e.g. `https://studio.<customer>.com/obot`) | `http://localhost:8080` | Linear's consent screen redirects the user's browser to this URL — must be browser-reachable, not just backend-reachable. Set at launch, never derived. |
-   | `OBOT_SERVER_ENCRYPTION_PROVIDER` | `custom` | `custom` | OAuth refresh tokens + DCR client secrets encrypted at rest. Cloud-KMS providers (`aws`/`gcp`/`azure`) are also valid for hosted Vibedata; `custom` works for self-host and composes with lock-in #8. |
-   | `OBOT_SERVER_ENCRYPTION_CONFIG_FILE` | `/data/keys/obot-encryption.yaml` (mounted from `${DATA_DIR}/keys/`) | same | File path inside the container. The actual `EncryptionConfiguration` YAML (k8s format, `aescbc` provider, base64 key) lives at `${DATA_DIR}/keys/obot-encryption.yaml` on the host per lock-in #8. **Not** the inline `OBOT_SERVER_ENCRYPTION_KEY` env var — file-based keeps secrets out of env, supports the standard k8s two-key rotation flow, and matches the cross-service pattern. |
+   | `OBOT_SERVER_ENCRYPTION_PROVIDER` | `custom` | **unset** (no encryption-at-rest in the sample) | OAuth refresh tokens + DCR client secrets encrypted at rest in production. Cloud-KMS providers (`aws`/`gcp`/`azure`) are also valid for hosted Vibedata; `custom` works for self-host and composes with lock-in #8. **The experiment omits encryption** because the `custom`/`aescbc` provider was empirically broken in Obot v0.22.x's postgres credential store at the time of writing (the `aescbc` transformer lookup fails for `credentials.obot.obot.ai` even with a correctly-formed `EncryptionConfiguration` YAML matching Obot's own templates). The error is internal to a launched sub-binary (`/obot-tools/tools/credential-stores/postgres`) and not surfaced by a config option. Production deployments using one of the cloud-KMS providers should be exercised separately before Studio ships; if `custom` is required, file an upstream bug and pin to a verified fix. |
+   | `OBOT_SERVER_ENCRYPTION_CONFIG_FILE` | `/data/keys/obot-encryption.yaml` (mounted from `${DATA_DIR}/keys/`) | **unset** | File path inside the container. The actual `EncryptionConfiguration` YAML (k8s format, `aescbc` provider, base64 key) lives at `${DATA_DIR}/keys/obot-encryption.yaml` on the host per lock-in #8. **Not** the inline `OBOT_SERVER_ENCRYPTION_KEY` env var — file-based keeps secrets out of env, supports the standard k8s two-key rotation flow, and matches the cross-service pattern. Sample skips per above. |
    | `OBOT_SERVER_MCPRUNTIME_BACKEND` | `kubernetes` (AKS deployment) | `docker` (local Docker for the experiment) | Per-deployment-target, not a single value. AKS uses native k8s API + auto-provisioned ServiceAccount/Role. Docker Compose uses local daemon. |
    | `OBOT_SERVER_ENABLE_REGISTRY_AUTH` | `true` | `true` | Registry API auth-gated; default `false` returns wildcard catalog reads to anyone. |
    | `OBOT_SERVER_AUDIT_LOGS_MODE` | `disk` | `disk` | Obot writes structured audit events to `/data/audit/*.jsonl`. **A Vibedata-built audit shim** tails this directory, translates Obot's event schema into Studio's audit format per `~/src/worktrees/docs/configure-connectors-fs/docs/functional/audit-trail/README.md`, and writes into Studio's audit store. The shim runs as a sidecar in production and (eventually) as a follow-up sample in this playground. REST-boundary events stay captured by Studio directly; the shim adds the gateway-internal events (silent token refreshes, DCR re-registration, OAuth protocol exchanges) so Vibedata's audit trail is complete. We picked `disk` over `s3` to keep the storage local to the Obot pod (no cloud dependency for the audit path), and over `off` so we don't lose gateway-internal events. Obot doesn't expose an OTLP audit mode today; if it ships one we can revisit and remove the shim. |
