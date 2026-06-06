@@ -4,21 +4,21 @@
 
 **Goal:** Add `samples/mcp_obot_linear_repl.py` — a single self-contained OpenHands SDK REPL that consumes a remote MCP (Linear) through the Obot gateway. Evaluation harness for the configure-connectors design that will land in Studio.
 
-**Architecture:** Plain blocking `input()` REPL on the main thread, identical shape to `samples/recap.py` and `samples/critic_refinement.py`. The agent's MCP client is configured via `fastmcp.mcp_config.MCPConfig` pointing at Obot's `/mcp` endpoint over `streamable-http` transport with a Bearer API-key header. Slash commands `/status` and `/connect <connector>` give diagnostics; a `Conversation` callback detects OAuth-class errors in observation events and prints a prominent reconnect banner pointing at Obot's user-settings deep-link. Optional OTel bootstrap is gated on `OTEL_EXPORTER_OTLP_ENDPOINT` and propagates W3C TraceContext to Obot.
+**Architecture:** Plain blocking `input()` REPL on the main thread, identical shape to `samples/recap.py` and `samples/critic_refinement.py`. The agent's MCP client is configured via `fastmcp.mcp_config.MCPConfig` pointing at Obot's `/mcp` endpoint over `streamable-http` transport with a Bearer API-key header. Slash commands `/status` and `/connect <connector>` give diagnostics; a `Conversation` callback detects OAuth-class errors in observation events and prints a prominent reconnect banner pointing at Obot's user-settings deep-link. OTel cross-boundary trace propagation is deferred to Studio production per spec lock-in #9; the sample omits it.
 
-**Tech Stack:** Python ≥ 3.12, `openhands-sdk` (>= 1.24.0), `openhands-tools`, `fastmcp` (vendored by openhands-sdk), `python-dotenv`, optional `opentelemetry-sdk` + `opentelemetry-exporter-otlp` + `opentelemetry-instrumentation-httpx`. `uv` for dependency / run management.
+**Tech Stack:** Python ≥ 3.12, `openhands-sdk` (>= 1.24.0), `openhands-tools`, `fastmcp` (vendored by openhands-sdk), `python-dotenv`. `uv` for dependency / run management.
 
 **Spec:** `docs/superpowers/specs/2026-06-06-mcp-obot-linear-repl-design.md`
 
-**Note on testing:** Per the spec, this is a playground sample with no test harness — there are no automated tests. Each task ends with a parse/import smoke test plus a commit. Manual verification (running the live REPL against a real Obot + Linear OAuth) is gathered into Task 6 at the end. The out-of-band Obot setup (docker run, admin UI, Linear OAuth, API key) is documented in the spec and is the user's responsibility before Task 6.
+**Note on testing:** Per the spec, this is a playground sample with no test harness — there are no automated tests. Each task ends with a parse/import smoke test plus a commit. Manual verification (running the live REPL against a real Obot + Linear OAuth) is gathered into Task 5 at the end. The out-of-band Obot setup (docker run, admin UI, Linear OAuth, API key) is documented in the spec and is the user's responsibility before Task 5.
 
 ---
 
 ## File Structure
 
 - **Create:** `samples/mcp_obot_linear_repl.py` — entire sample lives here. Single file matches the existing one-sample-one-file convention from `samples/recap.py` and `samples/critic_refinement.py`.
-- **Modify:** `.env.example` — add `OBOT_URL`, `OBOT_API_KEY`, `OTEL_EXPORTER_OTLP_ENDPOINT` declarations.
-- **Modify:** `pyproject.toml` — add `opentelemetry-sdk`, `opentelemetry-exporter-otlp`, `opentelemetry-instrumentation-httpx` as runtime deps (added in Task 5 alongside the OTel bootstrap code).
+- **Modify:** `.env.example` — add `OBOT_URL`, `OBOT_API_KEY` declarations.
+- **No `pyproject.toml` changes** — the sample uses only already-installed deps (`openhands-sdk`, `openhands-tools`, `python-dotenv`).
 
 ---
 
@@ -46,8 +46,6 @@ Append these lines to `/Users/hbanerjee/src/litellm-playground/.env.example`:
 ```
 OBOT_URL=http://localhost:8080
 OBOT_API_KEY=
-# Uncomment to enable OTel tracing of the sample (works with any OTLP collector, e.g. Jaeger):
-# OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
 ```
 
 - [ ] **Step 3: Create `samples/mcp_obot_linear_repl.py` with the skeleton**
@@ -529,179 +527,7 @@ git commit -m "Add OAuth banner callback: prints reconnect URL on token failures
 
 ---
 
-## Task 5: Optional OTel bootstrap
-
-**Goal:** When `OTEL_EXPORTER_OTLP_ENDPOINT` is set, initialize the Python OTel SDK with W3C TraceContext propagation and HTTPX instrumentation so outgoing MCP requests carry `traceparent` headers. Obot's OTel setup picks up the trace context on the receiving side. If the env var is not set, the sample runs unchanged with no tracing.
-
-**Files:**
-- Modify: `pyproject.toml`
-- Modify: `samples/mcp_obot_linear_repl.py`
-
-- [ ] **Step 1: Add OTel runtime deps to `pyproject.toml`**
-
-In `/Users/hbanerjee/src/litellm-playground/pyproject.toml`, find the `dependencies` list:
-
-```toml
-dependencies = [
-    "openhands-sdk>=1.24.0",
-    "openhands-tools>=1.24.0",
-    "python-dotenv>=1.2.2",
-]
-```
-
-Replace with:
-
-```toml
-dependencies = [
-    "openhands-sdk>=1.24.0",
-    "openhands-tools>=1.24.0",
-    "python-dotenv>=1.2.2",
-    "opentelemetry-sdk>=1.27.0",
-    "opentelemetry-exporter-otlp>=1.27.0",
-    "opentelemetry-instrumentation-httpx>=0.48b0",
-]
-```
-
-- [ ] **Step 2: Run `uv sync` to install the new deps**
-
-Run:
-```bash
-uv sync
-```
-Expected: uv resolves and installs the three new packages. Should complete in a few seconds; no errors.
-
-- [ ] **Step 3: Add the `setup_tracing` helper above `main`**
-
-In `samples/mcp_obot_linear_repl.py`, insert this function immediately before `def make_oauth_banner_callback(...)`:
-
-```python
-def setup_tracing() -> None:
-    """Bootstrap OTel tracing if OTEL_EXPORTER_OTLP_ENDPOINT is set.
-
-    All other OTel configuration (protocol, headers, sampler) comes from
-    standard OTEL_* env vars. W3C TraceContext + Baggage propagation is
-    installed globally, and HTTPX instrumentation auto-injects traceparent
-    headers on outgoing requests so Obot's receiving OTel pipeline can
-    continue the same trace.
-
-    If the env var is unset, this is a no-op and the sample runs untraced.
-    Any exception during bootstrap is caught and logged; tracing is never
-    fatal to the REPL.
-    """
-    endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
-    if not endpoint:
-        return
-    try:
-        from opentelemetry import trace
-        from opentelemetry.baggage.propagation import W3CBaggagePropagator
-        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
-            OTLPSpanExporter,
-        )
-        from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
-        from opentelemetry.propagate import set_global_textmap
-        from opentelemetry.propagators.composite import CompositePropagator
-        from opentelemetry.sdk.resources import Resource
-        from opentelemetry.sdk.trace import TracerProvider
-        from opentelemetry.sdk.trace.export import BatchSpanProcessor
-        from opentelemetry.trace.propagation.tracecontext import (
-            TraceContextTextMapPropagator,
-        )
-
-        provider = TracerProvider(
-            resource=Resource.create({
-                "service.name": "mcp-obot-linear-repl",
-                "service.version": "0.1.0",
-            }),
-        )
-        provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
-        trace.set_tracer_provider(provider)
-
-        set_global_textmap(
-            CompositePropagator([
-                TraceContextTextMapPropagator(),
-                W3CBaggagePropagator(),
-            ])
-        )
-
-        HTTPXClientInstrumentor().instrument()
-
-        print(f"OTel tracing → {endpoint}")
-    except Exception as exc:  # noqa: BLE001
-        print(f"(OTel init failed: {exc}; continuing without tracing)")
-```
-
-- [ ] **Step 4: Call `setup_tracing()` at the start of `main`**
-
-In `samples/mcp_obot_linear_repl.py`, find:
-
-```python
-def main() -> None:
-    load_dotenv()
-
-    # Clean ^C exit, matching set_confirmation_policy.py / recap.py.
-    signal.signal(
-        signal.SIGINT,
-        lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()),
-    )
-```
-
-Replace with:
-
-```python
-def main() -> None:
-    load_dotenv()
-    setup_tracing()
-
-    # Clean ^C exit, matching set_confirmation_policy.py / recap.py.
-    signal.signal(
-        signal.SIGINT,
-        lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()),
-    )
-```
-
-- [ ] **Step 5: Confirm the file parses and imports resolve**
-
-Run:
-```bash
-uv run python -c "import ast; ast.parse(open('samples/mcp_obot_linear_repl.py').read()); print('parse ok')"
-uv run python -c "
-import importlib.util
-spec = importlib.util.spec_from_file_location('cr', 'samples/mcp_obot_linear_repl.py')
-m = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(m)
-print('import ok')
-"
-```
-Expected: both print `... ok`.
-
-- [ ] **Step 6: Verify the OTel no-op path**
-
-With `OTEL_EXPORTER_OTLP_ENDPOINT` unset in your `.env` (or by temporarily unsetting it in the shell), confirm `setup_tracing()` returns immediately:
-
-```bash
-uv run python -c "
-import os
-os.environ.pop('OTEL_EXPORTER_OTLP_ENDPOINT', None)
-import importlib.util
-spec = importlib.util.spec_from_file_location('cr', 'samples/mcp_obot_linear_repl.py')
-m = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(m)
-m.setup_tracing()
-print('no-op ok')
-"
-```
-Expected: `no-op ok` — no other output, no exceptions.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add pyproject.toml uv.lock samples/mcp_obot_linear_repl.py
-git commit -m "Add optional OTel bootstrap gated on OTEL_EXPORTER_OTLP_ENDPOINT"
-```
-
----
-
-## Task 6: Final manual verification
+## Task 5: Final manual verification
 
 **Goal:** Walk the complete spec testing checklist end-to-end against a running Obot to confirm the sample matches the design.
 
@@ -721,9 +547,8 @@ Re-read the **Testing** section of `docs/superpowers/specs/2026-06-06-mcp-obot-l
    Create a Linear issue in my Inbox titled "test from mcp-obot-linear-repl"
    ```
    The agent should call a Linear tool through Obot and report success. The issue should appear in your Linear account.
-5. **OTel trace check (optional).** If `OTEL_EXPORTER_OTLP_ENDPOINT` is set and a collector is running (e.g. `docker run -d --name jaeger -p 4317:4317 -p 4318:4318 -p 16686:16686 jaegertracing/all-in-one:latest`), visit `http://localhost:16686` and confirm the trace spans link OpenHands → Obot → Linear under one trace ID.
-6. **OAuth recovery path.** With the agent running and Linear working, disconnect Linear inside Obot's UI (or revoke the grant in Linear's connected-apps page). Retype the instruction from step 4. Expected: the tool call fails, the OAuth reconnect banner prints, the REPL stays alive. Reconnect Linear in Obot's UI, retype the instruction, confirm it succeeds.
-7. **Clean exits.** `Ctrl-C` at the prompt exits cleanly; `/quit` and `/exit` exit cleanly.
+5. **OAuth recovery path.** With the agent running and Linear working, disconnect Linear inside Obot's UI (or revoke the grant in Linear's connected-apps page). Retype the instruction from step 4. Expected: the tool call fails, the OAuth reconnect banner prints, the REPL stays alive. Reconnect Linear in Obot's UI, retype the instruction, confirm it succeeds.
+6. **Clean exits.** `Ctrl-C` at the prompt exits cleanly; `/quit` and `/exit` exit cleanly.
 
 - [ ] **Step 2: If any check failed, fix and re-verify**
 
@@ -747,7 +572,7 @@ Expected: working tree clean. `samples/` contains `mcp_obot_linear_repl.py` alon
 
 ## Self-review notes
 
-- **Spec coverage:** Every spec section maps to a task. Architecture/Components 1-3 (LLM/Agent/Conversation, OBOT_URL/OBOT_API_KEY constants, MCPConfig) → Tasks 1-2. Components 4-7 (OTel, obot_status, REPL loop, OAuth banner callback) → Tasks 3-5. Out-of-band setup is the user's responsibility per spec; documented inline. Testing → Task 6. Non-goals (multi-user OAuth, per-intent filtering, OAuth driving from sample, dispatcher) — explicitly not implemented, by design.
-- **Type/name consistency:** `obot_url`, `obot_api_key`, `mcp_config`, `print_status`, `print_connect_url`, `make_oauth_banner_callback`, `_OAUTH_PATTERN`, `setup_tracing` are spelled identically across all tasks.
+- **Spec coverage:** Every in-scope spec section maps to a task. Architecture/Components 1-3 (LLM/Agent/Conversation, OBOT_URL/OBOT_API_KEY constants, MCPConfig) → Tasks 1-2. Components 4-6 (obot_status, REPL loop, OAuth banner callback) → Tasks 3-4. Out-of-band setup is the user's responsibility per spec; documented inline. Testing → Task 5. Non-goals (multi-user OAuth, per-intent filtering, OAuth driving from sample, dispatcher, OTel cross-boundary propagation per lock-in #9) — explicitly not implemented, by design.
+- **Type/name consistency:** `obot_url`, `obot_api_key`, `mcp_config`, `print_status`, `print_connect_url`, `make_oauth_banner_callback`, `_OAUTH_PATTERN` are spelled identically across all tasks.
 - **No placeholders:** every code step shows the actual code; every run step shows the actual command and expected output. The one "TBD" the spec called out (`/mcp` exact path on Obot's HTTP surface) is documented in Task 2 Step 3 as the working assumption with a note about the single line to change on first run, not as a TODO in the code.
 - **Lock-in alignment:** The plan implements the experiment-side of every lock-in in spec section "Design lock-ins for Studio production" (lock-ins #1-8) that has a Python-code implication. PG setup, encryption-config file generation, audit-shim, catalog repo override — those are out-of-band per the spec.

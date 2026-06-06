@@ -6,7 +6,7 @@
 
 ## Goal
 
-Stand up Obot locally, federate Linear through it (OAuth already mediated by Obot's UI), and drive a Python REPL that uses OpenHands' SDK to call Linear tools through Obot. The sample is the cheapest way to surface the load-bearing integration questions for the Studio production design: MCP-client authentication shape, gateway dispatcher vs per-tool advertisement, OTel span propagation across the agent → gateway → remote-MCP boundary, and the REST surface Studio's backend will call.
+Stand up Obot locally, federate Linear through it (OAuth already mediated by Obot's UI), and drive a Python REPL that uses OpenHands' SDK to call Linear tools through Obot. The sample is the cheapest way to surface the load-bearing integration questions for the Studio production design: MCP-client authentication shape, gateway dispatcher vs per-tool advertisement, OAuth recovery UX, and the REST surface Studio's backend will call.
 
 ## Non-goals
 
@@ -16,12 +16,13 @@ Stand up Obot locally, federate Linear through it (OAuth already mediated by Obo
 - Building our own dispatcher. We see what Obot already exposes through its `streamable-http` surface and judge whether per-tool advertisement is acceptable for Studio's system-message footprint or whether a dispatcher layer is still needed.
 - Productionization (TLS termination, persistence, multi-tenant scaling). Single-host local eval only.
 - Comparing gateways head-to-head in code. The vendor evaluation lives in the brainstorm; this sample commits to Obot.
+- OTel trace propagation across the OpenHands → Obot → remote-MCP boundary in the sample's code. Studio production wires this end-to-end per lock-in #9; the sample omits it to keep the evaluation focused on MCP plumbing and OAuth recovery. Obot's OTel hooks exist and work — proving them in code is a separate exercise, not what this sample is testing.
 
 ## Key external facts (verified)
 
 - **Obot exposes everything via `streamable-http` transport, regardless of the underlying server runtime.** (Quoted from Obot's `concepts/mcp-gateway.md`.) Single transport surface, even for stdio MCP servers that Obot itself hosts.
 - **OpenHands' MCP client (fastmcp) supports `streamable-http` natively.** `fastmcp.mcp_config.RemoteMCPServer.transport` accepts `Literal["http", "streamable-http", "sse"]`.
-- **Obot ships first-class OTel.** `pkg/services/otel.go` uses `go.opentelemetry.io/contrib/exporters/autoexport`, configured via standard `OTEL_*` env vars. W3C TraceContext + Baggage propagators are set globally. Traces, metrics, and logs are all emitted.
+- **Obot ships first-class OTel** (exercised by Studio production per lock-in #9; the sample does not exercise it). `pkg/services/otel.go` uses `go.opentelemetry.io/contrib/exporters/autoexport`, configured via standard `OTEL_*` env vars; W3C TraceContext + Baggage propagators are set globally; traces, metrics, and logs are all emitted. Studio's existing OTel collector receives them and links them to Studio's own service spans; the sample skips the wiring to stay focused on the MCP-plumbing evaluation.
 - **Obot's gateway authenticates each user and proxies with that identity.** Per-user OAuth tokens; admins can deploy one shared multi-user MCP and have each user supply per-user header values that pass through to the upstream MCP.
 
 ## Architecture
@@ -34,16 +35,14 @@ A single file: `samples/mcp_obot_linear_repl.py`. Runnable directly via `uv run 
 │  • OpenHands LLM (Minimax via OpenRouter)│
 │  • Agent + Conversation                  │
 │  • MCPConfig → Obot (streamable-http)    │
-│  • Optional OTel SDK init                │
 └──────────────────┬───────────────────────┘
                    │  streamable-http
-                   │  (traceparent + Authorization headers)
+                   │  (Authorization: Bearer <OBOT_API_KEY>)
                    ▼
 ┌──────────────────────────────────────────┐
 │ Obot (docker run, port 8080)             │  external, set up out-of-band
 │  • Linear federated via admin UI         │
 │  • Per-user OAuth tokens, API-key auth   │
-│  • OTel autoexport → collector if set    │
 └──────────────────┬───────────────────────┘
                    │
                    ▼
@@ -70,16 +69,9 @@ A single file: `samples/mcp_obot_linear_repl.py`. Runnable directly via `uv run 
    ```
    Passed to `Agent(llm=llm, mcp_config=mcp_config)`. OpenHands surfaces Obot-mediated tools as `mcp__obot__<linear-tool-name>` (e.g. `mcp__obot__linear_create_issue`).
 
-4. **Optional OTel bootstrap.** If `OTEL_EXPORTER_OTLP_ENDPOINT` is set, the sample initializes the Python OTel SDK at the top of `main()`:
-   - `TracerProvider` with `OTLPSpanExporter` (autoexport-equivalent — gRPC or HTTP based on env)
-   - `TextMapPropagator` set to `TraceContextTextMapPropagator + W3CBaggagePropagator`
-   - HTTPX instrumentation so outgoing MCP requests automatically include `traceparent` headers
-   - Resource attributes: `service.name=mcp-obot-linear-repl`, `service.version=0.1.0`
-   If the env var is unset, OTel is a no-op — sample still runs.
+4. **`obot_status()` helper.** `GET {OBOT_URL}/api/<TBD-on-first-run>` with the Bearer token, prints the user's connected MCPs and the catalog of available servers. Implements the `/status` slash command.
 
-5. **`obot_status()` helper.** `GET {OBOT_URL}/api/<TBD-on-first-run>` with the Bearer token, prints the user's connected MCPs and the catalog of available servers. Implements the `/status` slash command.
-
-6. **REPL loop.** Identical shape to `samples/recap.py`:
+5. **REPL loop.** Identical shape to `samples/recap.py`:
    - Clean `^C` exit via SIGINT handler raising `KeyboardInterrupt`.
    - `> ` prompt.
    - `/quit` / `/exit` / EOF / `KeyboardInterrupt` → exit.
@@ -88,7 +80,7 @@ A single file: `samples/mcp_obot_linear_repl.py`. Runnable directly via `uv run 
    - Empty line → continue.
    - Anything else → `conversation.send_message(line)` + `conversation.run()`.
 
-7. **`print_oauth_banner_on_failure(event)` callback.** Registered as a `Conversation` callback. Inspects every `ObservationEvent`; when the observation text matches OAuth-class failure patterns (`401`, `Unauthorized`, `OAuth`, `token expired`, `consent required`, `invalid_token`), prints a prominent banner above the agent's normal output:
+6. **`print_oauth_banner_on_failure(event)` callback.** Registered as a `Conversation` callback. Inspects every `ObservationEvent`; when the observation text matches OAuth-class failure patterns (`401`, `Unauthorized`, `OAuth`, `token expired`, `consent required`, `invalid_token`), prints a prominent banner above the agent's normal output:
    ```
    ────────────────────────────────────────────────────────
    ⚠  Linear OAuth needs attention for this user.
@@ -101,8 +93,8 @@ A single file: `samples/mcp_obot_linear_repl.py`. Runnable directly via `uv run 
 ### File layout impact
 
 - New file: `samples/mcp_obot_linear_repl.py`.
-- `.env.example` adds: `OBOT_URL=http://localhost:8080`, `OBOT_API_KEY=`, `OTEL_EXPORTER_OTLP_ENDPOINT=` (commented out).
-- `pyproject.toml`: add `opentelemetry-sdk`, `opentelemetry-exporter-otlp`, `opentelemetry-instrumentation-httpx` as runtime deps (only loaded if OTel env var is set, but always installed). `openhands-sdk`, `python-dotenv` already present.
+- `.env.example` adds: `OBOT_URL=http://localhost:8080`, `OBOT_API_KEY=`.
+- `pyproject.toml`: no changes; `openhands-sdk`, `openhands-tools`, `python-dotenv` already present, and the sample adds no new deps now that OTel is deferred to Studio production (lock-in #9). When Studio wires OTel, it does so in Studio's own service, not in this sample.
 
 ## Out-of-band setup the user does once before running
 
@@ -178,16 +170,6 @@ The sample uses **Obot's embedded Postgres** (bundled inside the Obot image, pgv
 
 6. Add `OBOT_URL=http://localhost:8080` and `OBOT_API_KEY=<key>` to the playground's `.env`.
 
-Optional, for OTel:
-
-7. Run a local OTLP collector:
-   ```bash
-   docker run -d --name jaeger -p 4317:4317 -p 4318:4318 -p 16686:16686 \
-     jaegertracing/all-in-one:latest
-   ```
-8. Add `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` to `.env`.
-9. Visit `http://localhost:16686` after running the REPL to view linked traces.
-
 ## Design lock-ins for Studio production
 
 The sample deliberately runs Obot against its **embedded Postgres** (bundled inside the Obot image) to keep Studio's existing `~/src/studio/docker-compose.yml` untouched during the experiment. The decisions below are the Studio production target the sample is validating — they are **not** the experiment's deployment shape, but they are the commitments to bake into Studio once the sample proves the approach end-to-end.
@@ -254,7 +236,11 @@ The sample deliberately runs Obot against its **embedded Postgres** (bundled ins
 
    **Key generation:** `openssl rand -base64 32` for AES-CBC-256. Out of scope for this lock-in: KMS-backed alternatives (`aws`/`gcp`/`azure` Obot providers) — those are an option for hosted Vibedata; self-host customers use `custom` with this file pattern.
 
-The sample is the test bed for these commitments. If anything proves wrong during implementation (e.g., Obot has an undocumented PG17 dependency we hit on PG16 migrations, the per-user reconnect flow surfaces UX gaps, DCR re-registration triggers consent more aggressively than `90d` suggests, or the key-file format diverges in a future Obot release), we adjust before this lands in Studio.
+9. **Studio production wires OTel end-to-end across the OpenHands → Obot → remote-MCP boundary.** Studio's compose already exports OTel to its bundled Alloy/Tempo stack (`OTEL_EXPORTER_OTLP_ENDPOINT: http://alloy:4318`); the Obot sidecar inherits the same env so its traces, metrics, and logs land in Studio's existing collector. Span continuity across the agent → gateway hop relies on W3C TraceContext: OpenHands' MCP client must inject `traceparent` headers on outgoing `streamable-http` requests, and Obot picks them up via its global propagator (`pkg/services/otel.go` already sets this up). If OpenHands' fastmcp client doesn't auto-inject, Studio wraps the transport — small one-time fix on Studio's side.
+
+   **The sample omits all of this** because the OTel wiring is not the load-bearing question we're evaluating. The sample tests MCP plumbing, dispatcher behavior, and OAuth recovery; OTel is an orthogonal pipeline Studio is already running for its own services and that Obot already supports natively. Treating OTel as solved-by-existing-infra in the sample keeps the evaluation focused. Studio's first Obot rollout adds the env-var wiring and verifies the cross-boundary trace continuity as part of Studio's own integration work, not as a separate sample.
+
+The sample is the test bed for these commitments. If anything proves wrong during implementation (e.g., Obot has an undocumented PG17 dependency we hit on PG16 migrations, the per-user reconnect flow surfaces UX gaps, DCR re-registration triggers consent more aggressively than `90d` suggests, OpenHands' fastmcp client doesn't propagate `traceparent` when Studio wires OTel, or the key-file format diverges in a future Obot release), we adjust before this lands in Studio.
 
 ## Error handling
 
@@ -268,7 +254,6 @@ The sample is the test bed for these commitments. If anything proves wrong durin
 | `/connect <connector>` typed | Print the reconnect URL for the named connector (default Linear path: `http://localhost:8080/user-settings/connectors/linear`). No in-band OAuth. Diagnostic shortcut that produces the same URL the failure callback would print. |
 | Other slash command typed (e.g. `/recap`, `/foo`) | Treated as a normal user message (no command parsing beyond `/quit`, `/exit`, `/status`, `/connect`). |
 | `KeyboardInterrupt` at the prompt | Clean exit, no traceback. Matches the pattern from `samples/recap.py`. |
-| OTel SDK initialization fails (e.g., collector unreachable) | Sample logs a warning and continues without tracing. Never fatal. |
 
 ## Recap of what the sample teaches Studio
 
@@ -277,15 +262,13 @@ By the end of the sample being runnable end-to-end, the following questions are 
 1. **Does OpenHands' fastmcp client talk to Obot's `streamable-http` endpoint cleanly?** Validates the production runtime plumbing Studio will rely on.
 2. **What does MCP-client authentication look like against Obot?** API key in `Authorization: Bearer` header is the working hypothesis; the sample either confirms or surfaces the correct shape on first run. Studio's backend will use the same.
 3. **Does Obot expose individual MCP tools (e.g., `mcp__obot__linear_create_issue`) or a dispatcher pattern (e.g., `mcp__obot__find` / `mcp__obot__exec`)?** Material to Studio's system-message footprint story — the configure-connectors spec asks for constant footprint via a dispatcher; this sample reveals whether Obot's `streamable-http` surface already solves that or whether Studio still needs to layer a dispatcher on top.
-4. **Does the OTel trace span across OpenHands → Obot → Linear cleanly?** If yes, Studio's observability story is solved by Obot's existing instrumentation plus standard `OTEL_*` env vars at the OpenHands process. If no, Studio needs to inject `traceparent` at the MCP transport layer.
-5. **What is the actual REST surface Studio's backend will need to call?** `/status` exercises one corner of it; the impl pass will discover the catalog/connection endpoints.
+4. **What is the actual REST surface Studio's backend will need to call?** `/status` exercises one corner of it; the impl pass will discover the catalog/connection endpoints.
 6. **What does latency feel like for a tool round-trip?** Quantitative read on the per-call overhead of routing OpenHands → Obot → Linear vs a direct Linear connection.
 
 ## Open questions surfaced (resolved during implementation, not blockers)
 
 - **Exact Obot MCP endpoint path.** `/mcp`, `/v1/mcp`, `/api/mcp`, or something else. First run reveals.
 - **Exact Obot API-key header shape.** `Authorization: Bearer <token>` is the convention; Obot may use a custom header. First run reveals.
-- **Whether OpenHands' fastmcp client emits `traceparent` headers automatically.** If yes, OTel is plug-and-play. If no, the sample wraps the transport to inject headers. Either is small.
 - **Obot's REST endpoints for catalog/connection listing.** `obot_status()` discovers and documents them.
 
 ## Testing
@@ -296,9 +279,8 @@ This is a playground sample. Verification is manual:
 2. Type `/status` — prints the connected MCPs and available tools. Confirms the MCP control plane is reachable.
 3. Type `/connect linear` — prints the reconnect URL (`http://localhost:8080/user-settings/connectors/linear`). Confirms the diagnostic shortcut works on demand.
 4. Type a real instruction (`Create a Linear issue in my Inbox project titled "test from sample"`). The agent uses a Linear tool through Obot and reports success.
-5. If `OTEL_EXPORTER_OTLP_ENDPOINT` is set, visit the collector UI and confirm the trace shows OpenHands → Obot → Linear spans linked under one trace ID.
-6. **OAuth recovery path.** Deliberately break the Linear connection — easiest path is to revoke the OAuth grant in Linear's own connected-apps settings, or click Disconnect on Linear inside Obot's UI. Then retype the instruction from step 4. Expected: the tool call fails, the agent reports it couldn't access Linear, and the sample prints the OAuth reconnect banner pointing at `http://localhost:8080/user-settings/connectors/linear`. The REPL stays alive. Reconnect Linear in Obot's UI, retype the instruction, and confirm it succeeds. This validates the production UX path Studio will deep-link users into.
-7. `Ctrl-C` at the prompt exits cleanly; `/quit` / `/exit` exit cleanly.
+5. **OAuth recovery path.** Deliberately break the Linear connection — easiest path is to revoke the OAuth grant in Linear's own connected-apps settings, or click Disconnect on Linear inside Obot's UI. Then retype the instruction from step 4. Expected: the tool call fails, the agent reports it couldn't access Linear, and the sample prints the OAuth reconnect banner pointing at `http://localhost:8080/user-settings/connectors/linear`. The REPL stays alive. Reconnect Linear in Obot's UI, retype the instruction, and confirm it succeeds. This validates the production UX path Studio will deep-link users into.
+6. `Ctrl-C` at the prompt exits cleanly; `/quit` / `/exit` exit cleanly.
 
 No automated tests. The playground does not have a test harness, and adding one for one sample is out of scope.
 
