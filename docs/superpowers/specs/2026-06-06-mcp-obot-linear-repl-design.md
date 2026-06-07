@@ -294,7 +294,7 @@ By the end of the sample being runnable end-to-end, the following questions are 
 
 ## Open questions surfaced (resolved during implementation, not blockers)
 
-- **Exact Obot MCP endpoint path.** `/mcp`, `/v1/mcp`, `/api/mcp`, or something else. First run reveals.
+- ~~**Exact Obot MCP endpoint path.** `/mcp`, `/v1/mcp`, `/api/mcp`, or something else. First run reveals.~~ **Resolved during impl:** Obot exposes each installed MCP server at `{OBOT_URL}/mcp-connect/{server_id}/mcp` — **per-server**, NOT a single gateway endpoint. The `server_id` is an Obot-generated identifier visible via the container's `mcp.server.id` label or via the `/api/all-mcps/servers` REST endpoint. The sample plumbs this through a new `OBOT_MCP_SERVER_ID` env var (see `.env.example`). For Studio production this means lock-in #3's "single gateway entry in conversation MCP set" needs revision — Studio's `mcp_config` will have one entry per installed MCP server, not one entry for everything. The dispatcher-meta-tools assumption breaks if there's no single gateway-level MCP endpoint; that's a follow-up to evaluate before Studio commits.
 - **Exact Obot API-key header shape.** `Authorization: Bearer <token>` is the convention; Obot may use a custom header. First run reveals.
 - **Obot's REST endpoints for catalog/connection listing.** `obot_status()` discovers and documents them.
 

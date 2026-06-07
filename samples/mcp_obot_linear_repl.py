@@ -105,6 +105,25 @@ def main() -> None:
             "for full out-of-band setup steps."
         )
 
+    # Obot exposes each user-installed MCP server at /mcp-connect/<server_id>/mcp.
+    # The server_id is per-install (auto-generated when you add the server in
+    # Obot's UI). Discover it once via:
+    #   curl -H "Authorization: Bearer $OBOT_BOOTSTRAP_TOKEN" \
+    #     "$OBOT_URL/api/all-mcps/servers" | python3 -m json.tool
+    # then add OBOT_MCP_SERVER_ID=<id> to .env. Defaults to the empty string,
+    # which triggers a clear error rather than a confusing 405 from /mcp.
+    obot_mcp_server_id = os.environ.get("OBOT_MCP_SERVER_ID", "")
+    if not obot_mcp_server_id:
+        raise SystemExit(
+            "OBOT_MCP_SERVER_ID is not set. After adding Linear in Obot's "
+            f"admin UI ({obot_url}), look up the auto-generated server ID via "
+            "the docker label (`docker inspect <linear-container> "
+            "--format '{{.Config.Labels}}'` → mcp.server.id) or via "
+            "`curl -H \"Authorization: Bearer $OBOT_BOOTSTRAP_TOKEN\" "
+            "$OBOT_URL/api/all-mcps/servers`. Add OBOT_MCP_SERVER_ID=<id> "
+            "to .env. See spec for details."
+        )
+
     llm = LLM(
         model="openrouter/z-ai/glm-5.1",
         api_key=SecretStr(os.environ["OPENROUTER_API_KEY"]),
@@ -117,7 +136,7 @@ def main() -> None:
         "mcpServers": {
             "obot": {
                 "transport": "streamable-http",
-                "url": f"{obot_url}/mcp",
+                "url": f"{obot_url}/mcp-connect/{obot_mcp_server_id}/mcp",
                 "headers": {"Authorization": f"Bearer {obot_api_key}"},
             }
         }
