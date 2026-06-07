@@ -105,23 +105,20 @@ def main() -> None:
             "for full out-of-band setup steps."
         )
 
-    # Obot exposes each user-installed MCP server at /mcp-connect/<server_id>/mcp.
-    # The server_id is per-install (auto-generated when you add the server in
-    # Obot's UI). Discover it once via:
-    #   curl -H "Authorization: Bearer $OBOT_BOOTSTRAP_TOKEN" \
-    #     "$OBOT_URL/api/all-mcps/servers" | python3 -m json.tool
-    # then add OBOT_MCP_SERVER_ID=<id> to .env. Defaults to the empty string,
-    # which triggers a clear error rather than a confusing 405 from /mcp.
+    # Obot exposes each MCP server at /mcp-connect/<id>. <id> can be either:
+    # (a) the catalog entry slug (e.g., "default-linear-2ad8f8d8") — stable
+    #     across installs, shown by Obot's admin UI as the canonical URL, OR
+    # (b) the per-install server ID (e.g., "ms1gwcmb") visible on the docker
+    #     container label `mcp.server.id` or in /api/all-mcps/servers.
+    # Either works for MCP transport; the catalog ID is more portable.
     obot_mcp_server_id = os.environ.get("OBOT_MCP_SERVER_ID", "")
     if not obot_mcp_server_id:
         raise SystemExit(
-            "OBOT_MCP_SERVER_ID is not set. After adding Linear in Obot's "
-            f"admin UI ({obot_url}), look up the auto-generated server ID via "
-            "the docker label (`docker inspect <linear-container> "
-            "--format '{{.Config.Labels}}'` → mcp.server.id) or via "
-            "`curl -H \"Authorization: Bearer $OBOT_BOOTSTRAP_TOKEN\" "
-            "$OBOT_URL/api/all-mcps/servers`. Add OBOT_MCP_SERVER_ID=<id> "
-            "to .env. See spec for details."
+            "OBOT_MCP_SERVER_ID is not set. In Obot's admin UI "
+            f"({obot_url}), open the installed Linear server and copy the "
+            "connection URL — the last path segment is the ID. Or use the "
+            "catalog entry slug (e.g., 'default-linear-2ad8f8d8') from "
+            "/api/all-mcps/entries. Add OBOT_MCP_SERVER_ID=<id> to .env."
         )
 
     llm = LLM(
@@ -136,7 +133,7 @@ def main() -> None:
         "mcpServers": {
             "obot": {
                 "transport": "streamable-http",
-                "url": f"{obot_url}/mcp-connect/{obot_mcp_server_id}/mcp",
+                "url": f"{obot_url}/mcp-connect/{obot_mcp_server_id}",
                 "headers": {"Authorization": f"Bearer {obot_api_key}"},
             }
         }
